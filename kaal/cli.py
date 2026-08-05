@@ -34,6 +34,8 @@ from rich.table import Table
 from rich import box
 from rich.text import Text
 
+from kaal.config import resolve_device, get_defaults, reset_config
+
 # ── App & console ─────────────────────────────────────────────────────────────
 app = typer.Typer(
     name="kaal",
@@ -63,14 +65,21 @@ def audit(
     attacks: str = typer.Option("fgsm,pgd,patch,physical", "--attacks",
                                 help="Comma-separated: fgsm,pgd,patch,blackbox,physical"),
     epsilon: float = typer.Option(0.03,  "--epsilon", help="Perturbation strength"),
-    steps:   int   = typer.Option(40,    "--steps",   help="PGD steps"),
+    steps:   Optional[int] = typer.Option(None,    "--steps",   help="PGD steps (default: device-based)"),
     output:  str   = typer.Option("./kaal_output/", "--output", help="Output directory"),
     report:  str   = typer.Option("pdf,json",        "--report", help="Report formats: pdf,json,html,all"),
     no_gradcam: bool = typer.Option(False, "--no-gradcam", help="Skip GradCAM (faster)"),
     quiet:      bool = typer.Option(False, "--quiet",      help="Suppress progress, show final result only"),
+    device: Optional[str] = typer.Option(None, "--device", help="Compute device: cpu or gpu"),
 ):
     """Run a full adversarial vulnerability audit."""
     start_time = time.time()
+
+    # ── Device resolution ─────────────────────────────────────────────────────
+    dev      = resolve_device(device)
+    defaults = get_defaults(dev)
+    if steps is None:
+        steps = defaults["pgd_steps"]
 
     if not quiet:
         _print_banner()
@@ -104,6 +113,7 @@ def audit(
         console.print(f"[dim]Model:[/dim]   [bold]{model_path.name}[/bold]")
         console.print(f"[dim]Dataset:[/dim] [bold]{dataset_path}[/bold]")
         console.print(f"[dim]Attacks:[/dim] {', '.join(a.upper() for a in attack_list)}")
+        console.print(f"[dim]Device:[/dim]  [bold]{dev.upper()}[/bold]  [dim](steps={steps})[/dim]")
         console.print(f"[dim]Output:[/dim]  [bold]{output_dir}[/bold]")
         console.print()
         console.print("─" * 46)
@@ -210,11 +220,11 @@ def audit(
                 kaal_model, kaal_dataset,
                 target_class=target_cls,
                 patch_fraction=0.05,
-                iterations=500,
+                iterations=defaults["iterations"],
                 output_dir=str(output_dir),
                 verbose=False,
             ),
-            500,
+            defaults["iterations"],
         )
         if not quiet:
             console.print(
@@ -369,10 +379,13 @@ def audit(
 def serve(
     port: int = typer.Option(8080,        "--port", help="Port number"),
     host: str = typer.Option("127.0.0.1", "--host", help="Host address"),
+    device: Optional[str] = typer.Option(None, "--device", help="Compute device: cpu or gpu"),
 ):
     """Launch the KAAL web UI (FastAPI + Next.js)."""
+    dev = resolve_device(device)
     _print_banner()
     console.print(f"  Starting KAAL web server on [bold]http://{host}:{port}[/bold]")
+    console.print(f"  [dim]Device:[/dim]   [bold]{dev.upper()}[/bold]")
     console.print(f"  [dim]Frontend:[/dim] http://localhost:3000  (start separately with: cd web/frontend && npm run dev)")
     console.print()
     try:
@@ -400,8 +413,13 @@ def patch(
     size:     float = typer.Option(0.05,  "--size",     help="Patch size as image fraction"),
     print_cm: float = typer.Option(15.0,  "--print-cm", help="Physical print size in cm"),
     output:   str   = typer.Option("./kaal_output/", "--output", help="Output directory"),
+    device:   Optional[str]  = typer.Option(None,  "--device", help="Compute device: cpu or gpu"),
+    smart:    bool = typer.Option(False, "--smart", help="GradCAM-guided patch initialization and position sampling"),
+    fast:     bool = typer.Option(False, "--fast",  help="Cap iterations at 100, skip baseline comparison (use with --smart)"),
 ):
     """Generate an adversarial patch only."""
+    dev      = resolve_device(device)
+    defaults = get_defaults(dev)
     _print_banner()
 
     model_path   = Path(model)
@@ -419,33 +437,88 @@ def patch(
 
     from kaal.engine.loader import load_model
     from kaal.engine.dataset import load_dataset
-    from kaal.attacks.patch import generate_patch
 
+    mode_label = "[bold cyan]SMART[/bold cyan] (GradCAM-guided)" if smart else "standard"
     console.print(f"  [dim]Model:[/dim]        {model_path.name}")
     console.print(f"  [dim]Target class:[/dim] {target}")
     console.print(f"  [dim]Patch size:[/dim]   {size*100:.0f}% of image area")
+    console.print(f"  [dim]Device:[/dim]       [bold]{dev.upper()}[/bold]  [dim](iterations={defaults['iterations']})[/dim]")
+    console.print(f"  [dim]Mode:[/dim]         {mode_label}")
+
+    if fast and smart:
+        console.print(
+            "  [dim][KAAL] Fast mode: 100 iterations, baseline comparison skipped[/dim]"
+        )
     console.print()
 
     kaal_model   = load_model(str(model_path))
     kaal_dataset = load_dataset(str(dataset_path), input_shape=kaal_model.input_shape)
 
-    with console.status("[bold red]Training adversarial patch...[/bold red]"):
-        result = generate_patch(
-            kaal_model, kaal_dataset,
-            target_class=target,
-            patch_fraction=size,
-            iterations=500,
-            output_dir=str(output_dir),
-            print_size_cm=print_cm,
-            verbose=False,
-        )
+    if smart:
+        from kaal.attacks.patch_smart import generate_smart_patch
 
-    console.print(f"  [green]Success rate:[/green] {result.attack_success_rate:.0%}")
-    console.print(f"  [dim]Avg confidence on target:[/dim] {result.avg_confidence_on_target:.3f}")
-    console.print(f"  [dim]Print size:[/dim] {print_cm:.0f} cm × {print_cm:.0f} cm")
-    console.print()
-    console.print(f"  Patch PNG:       [bold]{output_dir}/patch.png[/bold]")
-    console.print(f"  Printable PDF:   [bold]{result.patch_printable_pdf_path}[/bold]")
+        with console.status(
+            "[bold cyan]Training GradCAM-guided patch...[/bold cyan]"
+        ):
+            result = generate_smart_patch(
+                kaal_model, kaal_dataset,
+                target_class=target,
+                patch_fraction=size,
+                iterations=defaults["iterations"],
+                output_dir=str(output_dir),
+                print_size_cm=print_cm,
+                verbose=False,
+                fast=fast,
+            )
+
+        # Standard fields
+        console.print(f"  [green]Success rate:[/green] {result.attack_success_rate:.0%}")
+        console.print(f"  [dim]Avg confidence on target:[/dim] {result.avg_confidence_on_target:.3f}")
+        console.print(f"  [dim]Print size:[/dim] {print_cm:.0f} cm × {print_cm:.0f} cm")
+        console.print()
+
+        # Smart-specific section
+        console.print("  [bold cyan]── GradCAM Analysis ─────────────────────[/bold cyan]")
+        console.print(f"  [dim]Target layer   :[/dim] {result.target_layer_name}")
+        cov_str = (
+            f"{result.saliency_coverage:.0%}"
+            if result.saliency_coverage is not None else "N/A"
+        )
+        console.print(f"  [dim]Saliency cov.  :[/dim] {cov_str}")
+        if not fast and result.improvement_pct is not None:
+            sign  = "+" if result.improvement_pct >= 0 else ""
+            color = "green" if result.improvement_pct >= 0 else "red"
+            console.print(
+                f"  [dim]Smart vs generic:[/dim] "
+                f"[{color}]{sign}{result.improvement_pct:.1f}% success rate improvement[/{color}]"
+            )
+        console.print()
+
+        # File paths (smart patch uses different filenames)
+        patch_png = output_dir / "smart_patch.png"
+        console.print(f"  Patch PNG:       [bold]{patch_png}[/bold]")
+        console.print(f"  Printable PDF:   [bold]{result.patch_printable_pdf_path}[/bold]")
+
+    else:
+        from kaal.attacks.patch import generate_patch
+
+        with console.status("[bold red]Training adversarial patch...[/bold red]"):
+            result = generate_patch(
+                kaal_model, kaal_dataset,
+                target_class=target,
+                patch_fraction=size,
+                iterations=defaults["iterations"],
+                output_dir=str(output_dir),
+                print_size_cm=print_cm,
+                verbose=False,
+            )
+
+        console.print(f"  [green]Success rate:[/green] {result.attack_success_rate:.0%}")
+        console.print(f"  [dim]Avg confidence on target:[/dim] {result.avg_confidence_on_target:.3f}")
+        console.print(f"  [dim]Print size:[/dim] {print_cm:.0f} cm × {print_cm:.0f} cm")
+        console.print()
+        console.print(f"  Patch PNG:       [bold]{output_dir}/patch.png[/bold]")
+        console.print(f"  Printable PDF:   [bold]{result.patch_printable_pdf_path}[/bold]")
 
 
 # =============================================================================
@@ -458,8 +531,10 @@ def compare(
     after:  str = typer.Option(..., "--after",  help="Path to second audit JSON"),
     output: str = typer.Option("./kaal_output/compare/", "--output",
                                help="Output directory for comparison report"),
+    device: Optional[str] = typer.Option(None, "--device", help="Compute device: cpu or gpu"),
 ):
     """Compare two audit JSON reports side by side."""
+    resolve_device(device)   # validate only — compare doesn't use GPU, but keeps interface consistent
     _print_banner()
 
     before_path = Path(before)
@@ -536,6 +611,202 @@ def compare(
     with open(cmp_json, "w") as f:
         json.dump(comparison, f, indent=2)
     console.print(f"  Comparison saved to: [bold]{cmp_json}[/bold]")
+
+
+# =============================================================================
+# kaal certify
+# =============================================================================
+
+@app.command()
+def certify(
+    model:      str = typer.Option(...,             "--model",      help="Path to model file"),
+    dataset:    str = typer.Option(...,             "--dataset",    help="Path to image directory"),
+    output:     str = typer.Option("./kaal_cert/", "--output",     help="Output directory"),
+    org:        str = typer.Option("Unknown",       "--org",        help="Organisation name for the certificate"),
+    attacks:    str = typer.Option("fgsm,pgd",      "--attacks",    help="Comma-separated attack list"),
+    device:     Optional[str] = typer.Option(None,  "--device",     help="Compute device: cpu or gpu"),
+    compliance: bool = typer.Option(False,           "--compliance", help="Also generate a MoD/DRDO-style PDF compliance report"),
+    marking:    str = typer.Option("FOR OFFICIAL USE ONLY", "--marking",
+                                   help="Classification marking shown on compliance report pages"),
+):
+    """Run a full audit, fingerprint the model, and generate a certification bundle."""
+    from kaal.defence.certification import certify_model
+
+    dev = resolve_device(device)
+    _print_banner()
+
+    model_path   = Path(model)
+    dataset_path = Path(dataset)
+
+    if not model_path.exists():
+        console.print(f"[red]Error:[/red] Model not found: {model}")
+        raise typer.Exit(1)
+    if not dataset_path.exists():
+        console.print(f"[red]Error:[/red] Dataset not found: {dataset}")
+        raise typer.Exit(1)
+
+    attack_list = [a.strip().lower() for a in attacks.split(",") if a.strip()]
+
+    console.print(f"  [dim]Model:[/dim]      [bold]{model_path.name}[/bold]")
+    console.print(f"  [dim]Dataset:[/dim]    [bold]{dataset_path}[/bold]")
+    console.print(f"  [dim]Org:[/dim]        [bold]{org}[/bold]")
+    console.print(f"  [dim]Attacks:[/dim]    {', '.join(a.upper() for a in attack_list)}")
+    console.print(f"  [dim]Device:[/dim]     [bold]{dev.upper()}[/bold]")
+    console.print(f"  [dim]Output:[/dim]     [bold]{output}[/bold]")
+    if compliance:
+        console.print(f"  [dim]Compliance:[/dim] PDF report enabled  ({marking})")
+    console.print()
+
+    with console.status("[bold red]Running certification audit (2 passes)...[/bold red]"):
+        bundle = certify_model(
+            model_path=str(model_path),
+            dataset_dir=str(dataset_path),
+            output_dir=output,
+            attacks=attack_list,
+            org_name=org,
+        )
+
+    # ── Summary table ─────────────────────────────────────────────────────
+    console.print("─" * 46, style="dim white")
+    console.print()
+
+    def _rich_color(s: float) -> str:
+        if s <= 2.0: return "green"
+        if s <= 4.0: return "yellow"
+        if s <= 6.0: return "dark_orange"
+        return "bold red"
+
+    c = _rich_color(bundle.kvs_score)
+    console.print(
+        f"  [bold]KVS SCORE:  [{c}]{bundle.kvs_score:.1f}[/{c}][/bold]"
+        f"  [{c}]{bundle.kvs_label.upper()}[/{c}]"
+    )
+    console.print(
+        f"  [dim]Re-audit:   {bundle.re_audit_kvs_score:.1f}  "
+        f"({'deterministic' if bundle.is_deterministic else 'NON-DETERMINISTIC'})[/dim]"
+    )
+    console.print()
+    console.print(
+        f"  [dim]Fingerprint:[/dim] "
+        f"[bold]{bundle.model_fingerprint.file_hash[:16]}...[/bold]"
+    )
+    console.print()
+    console.print(f"  [dim]{bundle.operational_impact}[/dim]")
+    console.print()
+    console.print("─" * 46, style="dim white")
+    console.print()
+    console.print(f"  Badge:        [bold]{bundle.badge_svg_path}[/bold]")
+    console.print(f"  Certificate:  [bold]{bundle.certificate_json_path}[/bold]")
+
+    # ── Compliance PDF (optional) ─────────────────────────────────────────
+    if compliance:
+        from kaal.defence.compliance_report import generate_compliance_report
+        pdf_out = str(Path(output) / "compliance_report.pdf")
+        with console.status("[bold red]Generating compliance PDF...[/bold red]"):
+            pdf_path = generate_compliance_report(
+                bundle=bundle,
+                output_path=pdf_out,
+                classification_marking=marking,
+            )
+        console.print(f"  Compliance:   [bold]{pdf_path}[/bold]")
+
+
+# =============================================================================
+# kaal leaderboard
+# =============================================================================
+
+@app.command()
+def leaderboard(
+    json_path: str = typer.Option(...,                    "--json",   help="Path to leaderboard.json from run_benchmark()"),
+    output:    str = typer.Option("./leaderboard.html",   "--output", help="Output HTML file path"),
+):
+    """Generate a standalone HTML leaderboard from a benchmark JSON file."""
+    import json as _json
+    from kaal.benchmark.runner import BenchmarkEntry
+    from kaal.benchmark.leaderboard_page import generate_leaderboard_html
+
+    src = Path(json_path)
+    if not src.exists():
+        console.print(f"[red]Error:[/red] File not found: {json_path}")
+        raise typer.Exit(1)
+
+    try:
+        with open(src, encoding="utf-8") as f:
+            raw = _json.load(f)
+    except _json.JSONDecodeError as e:
+        console.print(f"[red]Error:[/red] Invalid JSON: {e}")
+        raise typer.Exit(1)
+
+    # Reconstruct BenchmarkEntry list from the saved dicts
+    entries: list[BenchmarkEntry] = []
+    for item in raw:
+        try:
+            entries.append(BenchmarkEntry(
+                model_name=item["model_name"],
+                model_path=item.get("model_path", ""),
+                kvs_score=float(item.get("kvs_score", 0.0)),
+                kvs_label=item.get("kvs_label", ""),
+                fgsm_success_rate=item.get("fgsm_success_rate"),
+                pgd_success_rate=item.get("pgd_success_rate"),
+                patch_success_rate=item.get("patch_success_rate"),
+                num_classes=int(item.get("num_classes", 0)),
+                input_shape=tuple(item.get("input_shape", [])),
+                audit_timestamp=item.get("audit_timestamp", ""),
+            ))
+        except (KeyError, TypeError, ValueError) as e:
+            console.print(f"[yellow]Warning:[/yellow] Skipping malformed entry: {e}")
+
+    if not entries:
+        console.print("[red]Error:[/red] No valid entries found in JSON.")
+        raise typer.Exit(1)
+
+    out_path = generate_leaderboard_html(entries, output_path=output)
+    console.print(f"  [green]OK[/green] Leaderboard saved -> [bold]{out_path}[/bold]")
+    console.print(f"  [dim]{len(entries)} model{'s' if len(entries) != 1 else ''} - open in any browser[/dim]")
+
+
+# =============================================================================
+# kaal config
+# =============================================================================
+
+@app.command()
+def config(
+    reset: bool = typer.Option(False, "--reset", help="Delete saved config and re-run setup"),
+    show:  bool = typer.Option(False, "--show",  help="Print current device setting and exit"),
+):
+    """Manage KAAL device configuration (CPU / GPU preference)."""
+    from kaal.config import _CONFIG_FILE, get_device
+
+    if show:
+        if _CONFIG_FILE.exists():
+            dev = get_device()
+            defaults = get_defaults(dev)
+            console.print(f"  [dim]Device:[/dim]          [bold]{dev.upper()}[/bold]")
+            console.print(f"  [dim]Config file:[/dim]     {_CONFIG_FILE}")
+            console.print(f"  [dim]Iterations:[/dim]      {defaults['iterations']}")
+            console.print(f"  [dim]PGD steps:[/dim]       {defaults['pgd_steps']}")
+            console.print(f"  [dim]Patch positions:[/dim] {defaults['patch_positions']}")
+            console.print(f"  [dim]Fast mode:[/dim]       {defaults['fast']}")
+        else:
+            console.print("  [dim]No config saved yet. Run[/dim] [bold]kaal config[/bold] [dim]to set up.[/dim]")
+        return
+
+    if reset:
+        reset_config()
+        return
+
+    # Default: show current config or run setup if missing
+    if not _CONFIG_FILE.exists():
+        get_device()   # triggers first-time prompt
+    else:
+        dev = get_device()
+        console.print(f"  [dim]Current device:[/dim] [bold]{dev.upper()}[/bold]")
+        console.print(f"  [dim]Config file:[/dim]    {_CONFIG_FILE}")
+        console.print()
+        console.print(
+            "  Run [bold]kaal config --reset[/bold] to change, "
+            "or pass [bold]--device cpu/gpu[/bold] on any command."
+        )
 
 
 # =============================================================================

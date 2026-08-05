@@ -1,0 +1,66 @@
+[
+  {
+    "model_name": "MobileNet-V2",
+    "model_path": "C:\\Users\\patha\\KAAL\\scripts\\leaderboard_models\\mobilenet_v2.pt",
+    "kvs_score": 9.8,
+    "kvs_label": "Catastrophic",
+    "fgsm_success_rate": 0.95,
+    "pgd_success_rate": 1.0,
+    "patch_success_rate": null,
+    "num_classes": 1000,
+    "input_shape": [
+      3,
+      224,
+      224
+    ],
+    "audit_timestamp": "2026-08-05T21:10:49.803563+00:00"
+  },
+  {
+    "model_name": "DenseNet-121",
+    "model_path": "C:\\Users\\patha\\KAAL\\scripts\\leaderboard_models\\densenet121.pt",
+    "kvs_score": 9.2,
+    "kvs_label": "Critical",
+    "fgsm_success_rate": 0.75,
+    "pgd_success_rate": 1.0,
+    "patch_success_rate": null,
+    "num_classes": 1000,
+    "input_shape": [
+      3,
+      224,
+      224
+    ],
+    "audit_timestamp": "2026-08-05T21:17:37.997151+00:00"
+  },
+  {
+    "model_name": "ResNet-50",
+    "model_path": "C:\\Users\\patha\\KAAL\\scripts\\leaderboard_models\\resnet50.pt",
+    "kvs_score": 9.1,
+    "kvs_label": "Critical",
+    "fgsm_success_rate": 0.7,
+    "pgd_success_rate": 1.0,
+    "patch_success_rate": null,
+    "num_classes": 1000,
+    "input_shape": [
+      3,
+      224,
+      224
+    ],
+    "audit_timestamp": "2026-08-05T21:09:42.486777+00:00"
+  },
+  {
+    "model_name": "EfficientNet-B0",
+    "model_path": "C:\\Users\\patha\\KAAL\\scripts\\leaderboard_models\\efficientnet_b0.pt",
+    "kvs_score": 8.9,
+    "kvs_label": "Critical",
+    "fgsm_success_rate": 0.65,
+    "pgd_success_rate": 1.0,
+    "patch_success_rate": null,
+    "num_classes": 1000,
+    "input_shape": [
+      3,
+      224,
+      224
+    ],
+    "audit_timestamp": "2026-08-05T21:13:44.661293+00:00"
+  }
+]
