@@ -1,0 +1,22 @@
+# KAAL — Core Engine Dependencies
+# Python 3.10.x required
+
+torch==2.2.0
+torchvision==0.17.0
+tensorflow==2.15.0
+onnx==1.15.0
+onnxruntime==1.17.0
+adversarial-robustness-toolbox==1.17.0
+foolbox==3.3.3
+grad-cam==1.4.8
+captum==0.7.0
+Pillow==10.2.0
+numpy==1.26.4
+matplotlib==3.8.3
+reportlab==4.1.0
+typer==0.27.1
+rich==15.0.0
+click==8.3.3
+scipy==1.12.0
+scikit-learn==1.4.0
+opencv-python==4.9.0.80
