@@ -77,6 +77,11 @@ export default function ComparePage() {
           </div>
         </div>
 
+        <p className="text-xs text-gray-600 mb-4">
+          Job IDs are shown in the URL after completing an audit:{' '}
+          <span className="font-mono text-gray-500">/results?job_id=xxxxxxxx</span>
+        </p>
+
         <button
           onClick={handleCompare}
           disabled={!canCompare}

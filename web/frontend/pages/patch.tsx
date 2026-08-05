@@ -245,6 +245,15 @@ export default function PatchPage() {
             {patchResult.plain_english && (
               <p className="text-xs text-gray-500 italic mb-5">{patchResult.plain_english}</p>
             )}
+            {/* Inline patch preview */}
+            <div className="my-4 border border-[#222] rounded-lg overflow-hidden bg-[#0A0A0A] flex items-center justify-center p-4">
+              <img
+                src={patchPngUrl(jobId)}
+                alt="Generated adversarial patch"
+                className="max-w-full max-h-48 object-contain"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              />
+            </div>
             <div className="flex gap-3 flex-wrap">
               <a
                 href={patchPngUrl(jobId)}

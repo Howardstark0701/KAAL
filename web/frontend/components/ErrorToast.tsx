@@ -5,9 +5,11 @@ interface ToastCtx { showError: (msg: string) => void; }
 
 const ToastContext = createContext<ToastCtx>({ showError: () => {} });
 
+// nextId lives outside the component so it never resets on re-render
+let nextId = 0;
+
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  let nextId = 0;
 
   const showError = useCallback((message: string) => {
     const id = ++nextId;

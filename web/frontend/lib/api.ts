@@ -15,8 +15,9 @@ import type {
   WSMessage,
 } from './types';
 
-const API_BASE = 'http://localhost:8080';
-const WS_BASE  = 'ws://localhost:8080';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const WS_BASE  = (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080')
+  .replace(/^http/, 'ws');
 
 // ---------------------------------------------------------------------------
 // ApiError

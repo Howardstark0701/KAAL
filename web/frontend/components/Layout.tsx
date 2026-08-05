@@ -7,7 +7,6 @@ interface LayoutProps { children: React.ReactNode; }
 const NAV_LINKS = [
   { href: '/',        label: 'Home' },
   { href: '/audit',   label: 'Audit' },
-  { href: '/results', label: 'Results' },
   { href: '/patch',   label: 'Patch' },
   { href: '/compare', label: 'Compare' },
 ];
@@ -87,8 +86,12 @@ export default function Layout({ children }: LayoutProps) {
         {children}
       </main>
 
-      <footer className="border-t border-[#222] text-center text-xs text-gray-600 py-4">
-        KAAL v1.0.0 — Adversarial Robustness Auditing Tool
+      <footer className="border-t border-[#222] text-center text-xs text-gray-600 py-4 flex items-center justify-center gap-4">
+        <span>KAAL v1.0.0 — Adversarial Robustness Auditing Tool</span>
+        <span>·</span>
+        <a href="https://github.com/Howardstark0701/KAAL" target="_blank" rel="noreferrer" className="hover:text-gray-400 transition-colors">GitHub</a>
+        <span>·</span>
+        <span>MIT License</span>
       </footer>
     </div>
   );

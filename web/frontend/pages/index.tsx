@@ -153,7 +153,7 @@ export default function HomePage() {
       </section>
 
       {/* KVS scale */}
-      <section className="mb-16">
+      <section className="mb-8">
         <h2 className="text-xl font-semibold text-gray-200 mb-2 text-center">KVS Score</h2>
         <p className="text-center text-sm text-gray-500 mb-6">
           KAAL Vulnerability Score — 0.0 to 10.0 across five dimensions
@@ -188,19 +188,6 @@ export default function HomePage() {
           </table>
         </div>
       </section>
-
-      {/* Footer */}
-      <footer className="text-xs text-gray-700 text-center py-8 border-t border-[#1a1a1a]">
-        MIT License &nbsp;·&nbsp;{' '}
-        <a
-          href="https://github.com/Howardstark0701/KAAL"
-          target="_blank"
-          rel="noreferrer"
-          className="hover:text-gray-500 transition-colors"
-        >
-          github.com/Howardstark0701/KAAL
-        </a>
-      </footer>
     </>
   );
 }

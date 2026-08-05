@@ -190,6 +190,11 @@ export default function AuditPage() {
             <div className="flex justify-between text-xs text-gray-600 mt-0.5">
               <span>0.001</span><span>1.0</span>
             </div>
+            {epsilon > 0.1 && (
+              <p className="text-xs text-yellow-500 mt-1">
+                &#9888; Epsilon &gt; 0.1 produces visually perceptible perturbations — use for stress testing only.
+              </p>
+            )}
           </div>
 
           {/* PGD steps */}

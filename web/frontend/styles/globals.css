@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -21,6 +23,7 @@ body {
   color: #F5F5F5;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 }
 
 /* Focus rings — WCAG 2.1 AA */
