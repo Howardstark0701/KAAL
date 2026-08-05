@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
+import { motion } from 'framer-motion';
 import ProgressBar from '../components/ProgressBar';
 import KVSGauge from '../components/KVSGauge';
 import RiskBadge from '../components/RiskBadge';
@@ -14,6 +15,54 @@ import type { AuditResult, WSMessage } from '../lib/types';
 // Recharts needs client-only render
 const KaalRadarChart = dynamic(() => import('../components/RadarChart'), { ssr: false });
 
+// ---------------------------------------------------------------------------
+// Skeleton placeholder shown while audit is running
+// ---------------------------------------------------------------------------
+function SkeletonBlock({ className = '' }: { className?: string }) {
+  return (
+    <div
+      className={`animate-pulse bg-[#1a1a1a] rounded-lg ${className}`}
+      aria-hidden="true"
+    />
+  );
+}
+
+function ResultsSkeleton() {
+  return (
+    <div className="space-y-4 mt-4" aria-label="Loading results…">
+      {/* KVS score skeleton */}
+      <div className="bg-[#111] border border-[#1a1a1a] rounded-lg p-6 flex flex-col items-center gap-3">
+        <SkeletonBlock className="h-3 w-24" />
+        <SkeletonBlock className="h-48 w-48 rounded-full" />
+        <SkeletonBlock className="h-3 w-48" />
+      </div>
+
+      {/* Radar chart skeleton */}
+      <div className="bg-[#111] border border-[#1a1a1a] rounded-lg p-6">
+        <SkeletonBlock className="h-3 w-40 mb-4" />
+        <SkeletonBlock className="h-64 w-full" />
+      </div>
+
+      {/* Dimension scores skeleton */}
+      <div className="bg-[#111] border border-[#1a1a1a] rounded-lg p-6">
+        <SkeletonBlock className="h-3 w-36 mb-5" />
+        <div className="space-y-4">
+          {[...Array(5)].map((_, i) => (
+            <div key={i} className="flex items-center gap-3">
+              <SkeletonBlock className="h-3 w-36 shrink-0" />
+              <SkeletonBlock className="flex-1 h-1.5" />
+              <SkeletonBlock className="h-5 w-20 rounded-full" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
 export default function ResultsPage() {
   const router = useRouter();
   const { showError } = useToast();
@@ -73,6 +122,13 @@ export default function ResultsPage() {
     );
   }
 
+  // Stagger helper
+  const fadeIn = (i: number) => ({
+    initial:    { opacity: 0, y: 10 },
+    animate:    { opacity: 1, y: 0 },
+    transition: { duration: 0.35, delay: i * 0.1 },
+  });
+
   return (
     <>
       <Head><title>Results — KAAL</title></Head>
@@ -87,10 +143,13 @@ export default function ResultsPage() {
 
         {/* Progress phase */}
         {!done && !failed && (
-          <div className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
-            <p className="text-sm text-gray-300 mb-3">Audit in progress…</p>
-            <ProgressBar pct={progress} label={step} />
-          </div>
+          <>
+            <div className="bg-[#111] border border-[#222] rounded-lg p-6 mb-4">
+              <p className="text-sm text-gray-300 mb-3">Audit in progress…</p>
+              <ProgressBar pct={progress} label={step} />
+            </div>
+            <ResultsSkeleton />
+          </>
         )}
 
         {/* Error state */}
@@ -108,27 +167,28 @@ export default function ResultsPage() {
         {done && result && (
           <>
             {/* KVS score */}
-            <section className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6 text-center">
+            <motion.section {...fadeIn(0)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6 text-center">
               <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">KVS Score</h2>
               <KVSGauge score={result.kvs.score} size={200} />
               {result.kvs.plain_english && (
                 <p className="text-xs text-gray-500 mt-4 max-w-sm mx-auto">{result.kvs.plain_english}</p>
               )}
-            </section>
+            </motion.section>
 
             {/* Radar chart */}
-            <section className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
+            <motion.section {...fadeIn(1)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
               <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Vulnerability Fingerprint</h2>
               <KaalRadarChart scores={result.kvs.dimension_scores} />
-            </section>
+            </motion.section>
 
             {/* Dimension scores */}
-            <section className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
+            <motion.section {...fadeIn(2)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
               <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Dimension Scores</h2>
               <div className="space-y-3">
                 {DIM_ORDER.map((key) => {
                   const score = result.kvs.dimension_scores[key];
-                  const skipped = result.kvs.dimensions_skipped.includes(key);
+                  // BUG FIX: dimensions_skipped can be undefined from backend
+                  const skipped = (result.kvs.dimensions_skipped ?? []).includes(key);
                   return (
                     <div key={key} className="flex items-center gap-3">
                       <span className="text-xs text-gray-400 w-44 shrink-0">{DIM_LABELS[key] ?? key}</span>
@@ -149,25 +209,25 @@ export default function ResultsPage() {
                   );
                 })}
               </div>
-            </section>
+            </motion.section>
 
-            {/* Remediation */}
-            {result.kvs.remediation.length > 0 && (
-              <section className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
+            {/* Remediation — BUG FIX: remediation can be undefined */}
+            {(result.kvs.remediation?.length ?? 0) > 0 && (
+              <motion.section {...fadeIn(3)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
                 <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Remediation</h2>
                 <ul className="space-y-2">
-                  {result.kvs.remediation.map((r, i) => (
+                  {result.kvs.remediation!.map((r, i) => (
                     <li key={i} className="flex gap-2 text-sm text-gray-300">
                       <span className="text-[#CC0000] shrink-0">→</span>
                       {r}
                     </li>
                   ))}
                 </ul>
-              </section>
+              </motion.section>
             )}
 
             {/* Model / dataset info */}
-            <section className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
+            <motion.section {...fadeIn(4)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
               <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Audit Details</h2>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
                 {[
@@ -184,10 +244,10 @@ export default function ResultsPage() {
                   </>
                 ))}
               </dl>
-            </section>
+            </motion.section>
 
             {/* Downloads */}
-            <section className="flex flex-wrap gap-3 mb-8">
+            <motion.section {...fadeIn(5)} className="flex flex-wrap gap-3 mb-8">
               <a
                 href={pdfReportUrl(jobId)}
                 target="_blank"
@@ -208,7 +268,7 @@ export default function ResultsPage() {
                   ↓ Patch PNG
                 </a>
               )}
-            </section>
+            </motion.section>
           </>
         )}
       </div>
