@@ -165,8 +165,6 @@ excludes = [
     "websockets",
     "aiofiles",
     # Unused ML frameworks
-    "sklearn",
-    "scikit_learn",
     "xgboost",
     "lightgbm",
     "transformers",
