@@ -231,7 +231,6 @@ def generate_smart_patch(
     patch_norm = patch_norm.detach().requires_grad_(True)
 
     optimizer = torch.optim.Adam([patch_norm], lr=learning_rate)
-    target_t  = torch.tensor([target_class])
 
     if verbose:
         print(f"[KAAL SmartPatch] Training {iterations} iterations  "

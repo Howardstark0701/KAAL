@@ -17,8 +17,8 @@ Algorithm:
            where f(·) = model confidence on the target (attack) class.
 
         3. Apply gradient step (ascent on attack class loss):
-               x ← x + α × sign(ĝ)          ← untargeted: push away from true class
-               x ← x − α × sign(ĝ)          ← targeted: push toward target class
+               x ← x − α × sign(ĝ)          ← untargeted: decrease confidence on true class
+               x ← x + α × sign(ĝ)          ← targeted: increase confidence on target class
 
         4. Project back to L∞ epsilon ball:
                x ← clip(x, x_orig − ε, x_orig + ε)
@@ -130,6 +130,7 @@ def blackbox_attack(
     max_queries: int = 1000,
     targeted: bool = False,
     target_class: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> BlackBoxResult:
     """Run a single NES black-box attack on one image.
 
@@ -150,6 +151,8 @@ def blackbox_attack(
         targeted:     If False (default), untargeted — cause any misclassification.
                       If True, targeted — steer prediction to target_class.
         target_class: Required when targeted=True.
+        seed:         Optional RNG seed for reproducible NES probes.
+                      np.random and torch are both seeded when provided.
 
     Returns:
         BlackBoxResult dataclass. query_efficiency feeds into KVS Dim 5.
@@ -204,6 +207,11 @@ def blackbox_attack(
     attack_class     = target_class if targeted else original_class
     queries_used     = 1   # for the initial predict call
 
+    # --- RNG seeding (reproducibility) --------------------------------------
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     # --- Run NES attack loop ------------------------------------------------
     x              = image_tensor.clone()
     best_adv       = x.clone()
@@ -229,17 +237,17 @@ def blackbox_attack(
         )
         queries_used += queries_per_step
 
-        # Gradient ascent on attack class logit:
-        # Untargeted: attack_class == original_class → increasing its loss
-        #             means we MOVE AWAY from it → ascent on that direction
+        # Gradient step on attack class confidence:
+        # Untargeted: attack_class == original_class → decreasing its
+        #             confidence means we MOVE AGAINST the gradient
         # Targeted:   attack_class == target_class  → we want to INCREASE
-        #             confidence on target → descend loss = ascend logit
+        #             confidence on target → move WITH the gradient
         if targeted:
-            # Move toward target_class: increase logit for target
+            # Move toward target_class: increase confidence on target
             x = x + alpha * grad_estimate.sign()
         else:
-            # Move away from original_class: increase loss on original
-            x = x + alpha * grad_estimate.sign()
+            # Move away from original_class: decrease confidence on original
+            x = x - alpha * grad_estimate.sign()
 
         # Project back to epsilon ball around original image
         x = torch.max(
@@ -339,6 +347,7 @@ def blackbox_attack_dataset(
     targeted: bool = False,
     target_class: Optional[int] = None,
     max_images: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> dict:
     """Run NES black-box attack over all images in a KaalDataset.
 
@@ -353,6 +362,7 @@ def blackbox_attack_dataset(
         targeted:     Targeted mode flag.
         target_class: Required if targeted=True.
         max_images:   Optional cap on images to process.
+        seed:         Optional RNG seed forwarded to each blackbox_attack call.
 
     Returns:
         dict with keys:
@@ -379,6 +389,7 @@ def blackbox_attack_dataset(
             max_queries=max_queries,
             targeted=targeted,
             target_class=target_class,
+            seed=seed,
         )
         results.append(result)
         count += 1

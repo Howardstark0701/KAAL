@@ -38,7 +38,36 @@ from rich import box
 
 from kaal.engine.loader import load_model
 from kaal.engine.dataset import load_dataset
+from kaal.engine.utils import resolve_input_shape
 from kaal.scoring.kvs import calculate_kvs
+
+
+# ---------------------------------------------------------------------------
+# Attack-name validation
+# ---------------------------------------------------------------------------
+
+_VALID_ATTACKS = {"fgsm", "pgd", "patch", "blackbox", "physical"}
+
+
+def _validate_attacks(attacks) -> set[str]:
+    """Validate attack names against the supported set.
+
+    Raises:
+        ValueError: If any name is unknown, or the set is empty.
+    """
+    attack_set = {a.lower().strip() for a in attacks if a.strip()}
+    unknown = attack_set - _VALID_ATTACKS
+    if unknown:
+        raise ValueError(
+            f"Unknown attack name(s): {', '.join(sorted(unknown))}. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    if not attack_set:
+        raise ValueError(
+            "No attacks specified. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    return attack_set
 
 console = Console()
 
@@ -80,6 +109,9 @@ class BenchmarkEntry:
     audit_timestamp: str
     """ISO 8601 UTC timestamp of when this audit completed."""
 
+    blackbox_success_rate: Optional[float] = None
+    """Black-box NES attack success rate (0–1). None if blackbox not run."""
+
 
 # ---------------------------------------------------------------------------
 # run_benchmark()
@@ -91,6 +123,7 @@ def run_benchmark(
     attacks: list[str] = None,
     output_dir: str = "./benchmark_results/",
     max_images: int = 50,
+    input_shape: Optional[tuple] = None,
 ) -> list[BenchmarkEntry]:
     """Run a full KAAL audit on each model and return sorted results.
 
@@ -101,6 +134,10 @@ def run_benchmark(
                      Supported: "fgsm", "pgd", "patch", "physical".
         output_dir:  Directory for leaderboard.json and per-model output.
         max_images:  Maximum images per model (keeps runtime reasonable).
+        input_shape: Optional explicit (H, W) or (C, H, W) override for the
+                     dataset, for dynamic-shape ONNX/TFLite models whose own
+                     input_shape has None spatial dims. Defaults to each
+                     model's own input shape.
 
     Returns:
         List of BenchmarkEntry sorted by kvs_score descending
@@ -109,7 +146,7 @@ def run_benchmark(
     if attacks is None:
         attacks = ["fgsm", "pgd", "patch"]
 
-    attack_set = {a.lower().strip() for a in attacks}
+    attack_set = _validate_attacks(attacks)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -139,6 +176,7 @@ def run_benchmark(
             attack_set=attack_set,
             max_images=max_images,
             model_output_dir=str(output_path / _safe_name(model_name)),
+            input_shape=input_shape,
         )
         entries.append(entry)
 
@@ -172,6 +210,7 @@ def _audit_one(
     attack_set: set[str],
     max_images: int,
     model_output_dir: str,
+    input_shape: Optional[tuple] = None,
 ) -> BenchmarkEntry:
     """Run attacks on one model and return a BenchmarkEntry."""
 
@@ -186,7 +225,7 @@ def _audit_one(
     try:
         ds = load_dataset(
             dataset_dir,
-            input_shape=km.input_shape,
+            input_shape=resolve_input_shape(km.input_shape, input_shape),
             max_images=max_images,
         )
     except Exception as exc:
@@ -196,6 +235,8 @@ def _audit_one(
     fgsm_agg   = None
     pgd_agg    = None
     patch_result = None
+    blackbox_result = None
+    blackbox_rate   = None
     adv_tensors: list = []
     orig_classes: list = []
 
@@ -250,6 +291,27 @@ def _audit_one(
         except Exception as exc:
             console.print(f"  [yellow]Patch skipped:[/yellow] {exc}")
 
+    # ── Black-box (NES) ────────────────────────────────────────────────────────
+    if "blackbox" in attack_set:
+        try:
+            from kaal.attacks.blackbox import blackbox_attack_dataset
+            with console.status("  Black-box..."):
+                bb_agg = blackbox_attack_dataset(km, ds, epsilon=0.03,
+                                                 max_images=max_images)
+            from types import SimpleNamespace
+            # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
+            # aggregate as an object rather than the raw dict.
+            blackbox_result = SimpleNamespace(
+                query_efficiency=bb_agg["avg_query_efficiency"],
+                success_rate=bb_agg["success_rate"],
+            )
+            blackbox_rate = bb_agg["success_rate"]
+            console.print(
+                f"  [dim]Black-box:[/dim] {bb_agg['success_rate']:.0%} success"
+            )
+        except Exception as exc:
+            console.print(f"  [yellow]Black-box skipped:[/yellow] {exc}")
+
     # ── Physical (optional) ───────────────────────────────────────────────────
     phys_result = None
     if "physical" in attack_set and adv_tensors:
@@ -270,8 +332,9 @@ def _audit_one(
     kvs = calculate_kvs(
         fgsm_result=fgsm_agg,
         pgd_result=pgd_agg,
+        patch_result=patch_result,
         physical_result=phys_result,
-        min_epsilon=0.03,
+        blackbox_result=blackbox_result,
     )
 
     return BenchmarkEntry(
@@ -282,6 +345,7 @@ def _audit_one(
         fgsm_success_rate=fgsm_agg["success_rate"] if fgsm_agg else None,
         pgd_success_rate=pgd_agg["success_rate"] if pgd_agg else None,
         patch_success_rate=patch_result.attack_success_rate if patch_result else None,
+        blackbox_success_rate=blackbox_rate,
         num_classes=km.num_classes,
         input_shape=tuple(km.input_shape),
         audit_timestamp=datetime.now(timezone.utc).isoformat(),
@@ -308,6 +372,7 @@ def _make_table() -> Table:
     t.add_column("FGSM",  justify="right",  style="dim white",  no_wrap=True, min_width=6)
     t.add_column("PGD",   justify="right",  style="dim white",  no_wrap=True, min_width=6)
     t.add_column("Patch", justify="right",  style="dim white",  no_wrap=True, min_width=6)
+    t.add_column("BB",    justify="right",  style="dim white",  no_wrap=True, min_width=6)
     return t
 
 
@@ -323,6 +388,7 @@ def _refresh_table(table: Table, entries: list[BenchmarkEntry]) -> None:
             _pct(e.fgsm_success_rate),
             _pct(e.pgd_success_rate),
             _pct(e.patch_success_rate),
+            _pct(e.blackbox_success_rate),
         )
 
 

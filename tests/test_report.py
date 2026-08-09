@@ -70,7 +70,6 @@ def kvs_res(fgsm_res, pgd_res, physical_res):
         pgd_result={"success_rate": float(pgd_res.success),
                     "epsilon_used": pgd_res.epsilon_used},
         physical_result=physical_res,
-        min_epsilon=0.03,
     )
 
 

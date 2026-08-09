@@ -2,11 +2,11 @@
 
 Spec 13.1 — Phase 7, Kiro Prompt 7.2.
 
-Generates a pentagon radar/spider chart showing model vulnerability
-across all five KVS dimensions. Every model gets a unique visual shape.
+Generates a hexagonal radar/spider chart showing model vulnerability
+across all six KVS dimensions. Every model gets a unique visual shape.
 
 Chart specifications (exact KAAL dark theme):
-    Type             : Radar / Spider (pentagon — 5 axes)
+    Type             : Radar / Spider (hexagon — 6 axes)
     Background       : #0A0A0A
     Fill             : #CC0000 at 30% opacity (alpha=0.3)
     Border           : #CC0000, linewidth 2
@@ -16,11 +16,12 @@ Chart specifications (exact KAAL dark theme):
     Scale per axis   : 0 (center/robust) to 10 (outer/vulnerable)
 
 Axes order (clockwise from top):
-    1. FGSM Susceptibility    (top)
-    2. PGD Susceptibility     (top-right)
-    3. Physical Survivability (bottom-right)
-    4. Black-Box Efficiency   (bottom-left)
-    5. Perturbation Threshold (top-left)
+    1. FGSM Susceptibility        (top)
+    2. PGD Susceptibility         (top-right)
+    3. Physical Survivability     (bottom-right)
+    4. Black-Box Efficiency       (bottom-left)
+    5. Empirical Robustness       (top-left)
+    6. Adversarial Overconfidence (left)
 
 Comparison mode:
     Primary model  : #CC0000 fill + border
@@ -51,7 +52,8 @@ _AXES: list[str] = [
     "pgd_susceptibility",
     "physical_survivability",
     "blackbox_efficiency",
-    "perturbation_threshold",
+    "empirical_robustness",
+    "adversarial_overconfidence",
 ]
 
 _AXIS_LABELS: list[str] = [
@@ -59,7 +61,8 @@ _AXIS_LABELS: list[str] = [
     "PGD",
     "Physical",
     "Black-box",
-    "Threshold",
+    "Empirical",
+    "Overconf",
 ]
 
 # KAAL colour constants
@@ -318,7 +321,7 @@ def _draw_radar(
 
 
 def _extract_scores(kvs_result) -> list[float]:
-    """Extract the five axis scores from a KVSResult in _AXES order.
+    """Extract the six axis scores from a KVSResult in _AXES order.
 
     Missing dimensions default to 0.0.
     """

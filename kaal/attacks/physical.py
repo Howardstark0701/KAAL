@@ -435,8 +435,14 @@ def _jpeg(img: Image.Image, quality: int) -> Image.Image:
     return Image.open(buf).copy()  # .copy() detaches from BytesIO
 
 
-def _gaussian_noise(img: Image.Image, sigma: float) -> Image.Image:
-    """Add zero-mean Gaussian noise with given sigma (in [0,1] pixel scale)."""
+def _gaussian_noise(img: Image.Image, sigma: float,
+                    seed: Optional[int] = None) -> Image.Image:
+    """Add zero-mean Gaussian noise with given sigma (in [0,1] pixel scale).
+
+    Pass seed to make the noise reproducible (np.random is seeded first).
+    """
+    if seed is not None:
+        np.random.seed(seed)
     arr = np.asarray(img).astype(np.float32) / 255.0
     noise = np.random.normal(0, sigma, arr.shape).astype(np.float32)
     noisy = np.clip(arr + noise, 0.0, 1.0)

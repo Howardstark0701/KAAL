@@ -3,21 +3,24 @@
 KVS = KAAL Vulnerability Score
 Scale: 0.0 to 10.0
 Purpose: Single number summarising a model's adversarial robustness
-         across five weighted dimensions.
+         across six weighted dimensions.
 
-Five Dimensions and Weights:
-    Dim 1 — FGSM Susceptibility      20%   fgsm_success_rate × 10
-    Dim 2 — PGD  Susceptibility      30%   pgd_success_rate  × 10
-    Dim 3 — Perturbation Threshold   20%   (1 − min_epsilon) × 10
-    Dim 4 — Physical Survivability   20%   physical_survival_rate × 10
-    Dim 5 — Black-Box Efficiency     10%   query_efficiency × 10
+Dimensions and Weights (base weights sum to 0.95):
+    Dim 1  — FGSM Susceptibility           20%   fgsm_success_rate × 10
+    Dim 2  — PGD  Susceptibility           30%   pgd_success_rate  × 10
+    Dim 3a — Empirical Robustness          7.5%  mean ‖x_adv−x‖∞ of successful attacks / epsilon
+    Dim 3b — Adversarial Overconfidence    7.5%  mean confidence of successful adversarial examples × 10
+    Dim 4  — Physical Survivability        20%   physical_survival_rate × 10
+    Dim 5  — Black-Box Efficiency          10%   query_efficiency × 10
 
-Final score:
-    kvs = 0.20×dim1 + 0.30×dim2 + 0.20×dim3 + 0.20×dim4 + 0.10×dim5
+Final score (always renormalised over tested dimensions):
+    effective_weight = w_i / Σ(w_j over tested dims)
+    kvs = Σ effective_weight × score_i
     kvs = round(kvs, 1), clamped to [0.0, 10.0]
 
-Any dimension whose result is None is skipped and its weight is
-redistributed proportionally among the tested dimensions.
+Any dimension whose result is None is skipped. Because the base weights sum
+to 0.95, tested weights are always renormalised to sum to 1.0 so the headline
+score stays comparable no matter which dimensions actually ran.
 
 KVS Labels:
     ≤ 2.0  Robust
@@ -30,7 +33,6 @@ KVS Labels:
 Remediation rules:
     high_fgsm        if dim1 score > 6.0
     high_pgd         if dim2 score > 6.0
-    low_threshold    if dim3 score > 7.0
     high_physical    if dim4 score > 6.0
     high_blackbox    if dim5 score > 6.0
 """
@@ -54,10 +56,6 @@ REMEDIATION_MAP: dict[str, str] = {
         "Implement adversarial training: retrain model with PGD-generated "
         "examples included in training set."
     ),
-    "low_threshold": (
-        "Model is sensitive to minimal perturbations. "
-        "Consider ensemble methods or certified defenses."
-    ),
     "high_physical": (
         "Attack survives real-world conditions. "
         "Physical patch detection layer recommended."
@@ -68,19 +66,20 @@ REMEDIATION_MAP: dict[str, str] = {
     ),
 }
 
-# Dimension weights — must sum to 1.0
+# Dimension weights — base weights sum to 0.95; the aggregation always
+# renormalises over tested weights (see calculate_kvs).
 _DIM_WEIGHTS: dict[str, float] = {
-    "fgsm_susceptibility":   0.20,
-    "pgd_susceptibility":    0.30,
-    "perturbation_threshold": 0.20,
-    "physical_survivability": 0.20,
-    "blackbox_efficiency":   0.10,
+    "fgsm_susceptibility":        0.20,
+    "pgd_susceptibility":         0.30,
+    "empirical_robustness":       0.075,
+    "adversarial_overconfidence": 0.075,
+    "physical_survivability":     0.20,
+    "blackbox_efficiency":        0.10,
 }
 
 # Remediation thresholds
 _THRESH_HIGH_FGSM      = 6.0
 _THRESH_HIGH_PGD       = 6.0
-_THRESH_LOW_THRESHOLD  = 7.0
 _THRESH_HIGH_PHYSICAL  = 6.0
 _THRESH_HIGH_BLACKBOX  = 6.0
 
@@ -126,28 +125,27 @@ class KVSResult:
 def calculate_kvs(
     fgsm_result=None,
     pgd_result=None,
+    patch_result=None,
     physical_result=None,
     blackbox_result=None,
-    min_epsilon: Optional[float] = None,
     fgsm_success_rate: Optional[float] = None,
     pgd_success_rate: Optional[float] = None,
 ) -> KVSResult:
     """Calculate the KAAL Vulnerability Score from attack results.
 
     Pass the result objects from the attack modules. Any that are None
-    are skipped and their weight is redistributed proportionally.
+    are skipped; tested weights are always renormalised to sum to 1.0.
 
     Args:
         fgsm_result:       FGSMResult from fgsm_attack_dataset(), or a dict
                            with key 'success_rate'. Pass None to skip.
         pgd_result:        PGDResult from pgd_attack_dataset(), or a dict
                            with key 'success_rate'. Pass None to skip.
+        patch_result:      PatchResult from generate_patch() (optional).
+                           Used only for Dim 3b (adversarial overconfidence).
         physical_result:   PhysicalRobustnessResult. Uses overall_survival_rate.
-        blackbox_result:   BlackBoxResult (stub — not yet implemented).
+        blackbox_result:   BlackBoxResult from blackbox_attack_dataset().
                            Pass None to skip.
-        min_epsilon:       Minimum epsilon at which FGSM achieves ≥50% success
-                           across the dataset. Used for Dim 3.
-                           If None, estimated from fgsm_result.epsilon_used.
         fgsm_success_rate: Override the FGSM success rate (0.0–1.0) if passing
                            a pre-computed value instead of a result object.
         pgd_success_rate:  Override the PGD success rate similarly.
@@ -164,16 +162,16 @@ def calculate_kvs(
             fgsm_result=fgsm_agg,
             pgd_result=pgd_agg,
             physical_result=phys,
-            min_epsilon=0.03,
         )
         print(kvs.score, kvs.label)
     """
     dim_scores: dict[str, Optional[float]] = {
-        "fgsm_susceptibility":    None,
-        "pgd_susceptibility":     None,
-        "perturbation_threshold": None,
-        "physical_survivability": None,
-        "blackbox_efficiency":    None,
+        "fgsm_susceptibility":         None,
+        "pgd_susceptibility":          None,
+        "empirical_robustness":        None,
+        "adversarial_overconfidence":  None,
+        "physical_survivability":      None,
+        "blackbox_efficiency":         None,
     }
 
     # ── Dim 1 — FGSM Susceptibility (weight 20%) ────────────────────────────
@@ -186,14 +184,24 @@ def calculate_kvs(
     if pgd_rate is not None:
         dim_scores["pgd_susceptibility"] = pgd_rate * 10.0
 
-    # ── Dim 3 — Perturbation Threshold (weight 20%) ─────────────────────────
-    # Score = (1 − min_epsilon) × 10
-    # Lower epsilon needed → higher score → more vulnerable
-    # min_epsilon clamped to [0.001, 1.0] before calculation
-    eps = _resolve_min_epsilon(min_epsilon, fgsm_result, pgd_result)
-    if eps is not None:
-        eps_clamped = max(0.001, min(1.0, eps))
-        dim_scores["perturbation_threshold"] = (1.0 - eps_clamped) * 10.0
+    # ── Dim 3a — Empirical Robustness (weight 7.5%) ─────────────────────────
+    # Mean L∞ perturbation ‖x_adv − x_orig‖∞ over successful examples relative
+    # to the epsilon budget used. PGD is preferred when both attacks ran.
+    #   ratio = mean_linf / epsilon
+    #   score = min(ratio, 1.0) × 10
+    # Attack ran but no example succeeded → 10.0 (minimal-perturbation risk
+    # cannot be ruled out). No per-example perturbation data → skip.
+    dim_scores["empirical_robustness"] = _empirical_robustness_score(
+        pgd_result, fgsm_result
+    )
+
+    # ── Dim 3b — Adversarial Overconfidence (weight 7.5%) ───────────────────
+    # Mean adversarial_confidence over successful examples across FGSM/PGD/
+    # patch/black-box, ×10. Attack data present but zero successes → 0.0.
+    # No attack data at all → skip.
+    dim_scores["adversarial_overconfidence"] = _adversarial_overconfidence_score(
+        fgsm_result, pgd_result, patch_result, blackbox_result
+    )
 
     # ── Dim 4 — Physical Survivability (weight 20%) ─────────────────────────
     if physical_result is not None:
@@ -224,20 +232,17 @@ def calculate_kvs(
             remediation=[],
         )
 
-    # Redistribute skipped weights proportionally
-    total_skipped_weight = sum(_DIM_WEIGHTS[d] for d in skipped)
-    total_tested_weight  = sum(_DIM_WEIGHTS[d] for d in tested)
+    # Always renormalise tested weights to sum to 1.0. The base weights sum to
+    # 0.95 (dims 3a/3b are 7.5% each), so skipped dimensions are absorbed
+    # proportionally: effective_weight = w_i / Σ(w_j for tested dims).
+    total_tested_weight = sum(_DIM_WEIGHTS[d] for d in tested)
 
     kvs_raw = 0.0
     scored_dims: dict[str, float] = {}
 
     for dim in tested:
         raw_score = dim_scores[dim]
-        # Effective weight = original weight + proportional share of skipped weight
-        effective_weight = (
-            _DIM_WEIGHTS[dim]
-            + _DIM_WEIGHTS[dim] / total_tested_weight * total_skipped_weight
-        )
+        effective_weight = _DIM_WEIGHTS[dim] / total_tested_weight
         kvs_raw += effective_weight * raw_score
         scored_dims[dim] = round(raw_score, 2)
 
@@ -327,33 +332,101 @@ def _extract_success_rate(
     return None
 
 
-def _resolve_min_epsilon(
-    min_epsilon: Optional[float],
-    fgsm_result,
-    pgd_result,
-) -> Optional[float]:
-    """Resolve the minimum epsilon for Dim 3.
+def _example_linf(result) -> Optional[float]:
+    """L∞ perturbation ‖x_adv − x_orig‖∞ for a single result, or None.
 
-    Priority:
-        1. Explicit min_epsilon argument
-        2. epsilon_used from fgsm_result (aggregate dict or single result)
-        3. epsilon_used from pgd_result
-        4. None if nothing available
+    FGSMResult exposes perturbation_tensor; PGDResult exposes the computed
+    mean_perturbation_linf field.
     """
-    if min_epsilon is not None:
-        return float(min_epsilon)
+    pt = getattr(result, "perturbation_tensor", None)
+    if pt is not None:
+        return float(pt.abs().amax().item())
+    mpl = getattr(result, "mean_perturbation_linf", None)
+    if mpl is not None:
+        return float(mpl)
+    return None
 
-    for result in (fgsm_result, pgd_result):
+
+def _empirical_robustness_score(pgd_result, fgsm_result) -> Optional[float]:
+    """Dim 3a — mean ‖x_adv − x_orig‖∞ of successful examples / epsilon.
+
+    Prefers PGD when both attacks ran. Returns None to skip + redistribute
+    when neither attack carries per-example perturbation data.
+    """
+    for result in (pgd_result, fgsm_result):
         if result is None:
             continue
         if isinstance(result, dict):
+            entries = result.get("results")
             eps = result.get("epsilon_used")
         else:
+            entries = [result]
             eps = getattr(result, "epsilon_used", None)
-        if eps is not None:
-            return float(eps)
-
+        if entries is None or eps is None:
+            continue  # success_rate-only dict → no per-example perturbation data
+        eps = float(eps)
+        n_success = 0
+        linfs: list[float] = []
+        for r in entries:
+            if not getattr(r, "success", False):
+                continue
+            n_success += 1
+            linfs.append(_example_linf(r))
+        linfs = [l for l in linfs if l is not None]
+        if n_success == 0:
+            return 10.0  # attack ran, no successes
+        if not linfs:
+            continue  # successes but no perturbation data → try next source
+        mean_linf = sum(linfs) / len(linfs)
+        return min(mean_linf / eps, 1.0) * 10.0
     return None
+
+
+def _adversarial_overconfidence_score(
+    fgsm_result,
+    pgd_result,
+    patch_result,
+    blackbox_result,
+) -> Optional[float]:
+    """Dim 3b — mean adversarial_confidence over successful examples × 10.
+
+    Collects confidence only from examples where the attack succeeded.
+    Patch exposes only a dataset-level average, so avg_confidence_on_target is
+    used as the representative value when its success rate is > 0.
+    Returns None to skip + redistribute when no attack data is available.
+    """
+    confs: list[float] = []
+    data_seen = False
+    for result in (fgsm_result, pgd_result, blackbox_result):
+        if result is None:
+            continue
+        entries = result.get("results") if isinstance(result, dict) else [result]
+        if entries is None:
+            continue  # success_rate-only dict → no per-example confidence data
+        # Only real attack results (which carry `.success`) are example data.
+        # A bare object exposing only e.g. query_efficiency is not.
+        entries = [r for r in entries if hasattr(r, "success")]
+        if not entries:
+            continue
+        data_seen = True
+        for r in entries:
+            if not getattr(r, "success", False):
+                continue
+            c = getattr(r, "adversarial_confidence", None)
+            if c is not None:
+                confs.append(float(c))
+    if patch_result is not None:
+        rate = getattr(patch_result, "attack_success_rate", 0.0) or 0.0
+        avg = getattr(patch_result, "avg_confidence_on_target", None)
+        if avg is not None:
+            data_seen = True
+            if rate > 0.0:
+                confs.append(float(avg))
+    if not data_seen:
+        return None
+    if not confs:
+        return 0.0  # attack data present, zero successful examples
+    return sum(confs) / len(confs) * 10.0
 
 
 def _build_remediation(dim_scores: dict[str, float]) -> list[str]:
@@ -365,9 +438,6 @@ def _build_remediation(dim_scores: dict[str, float]) -> list[str]:
 
     if dim_scores.get("pgd_susceptibility", 0.0) > _THRESH_HIGH_PGD:
         actions.append(REMEDIATION_MAP["high_pgd"])
-
-    if dim_scores.get("perturbation_threshold", 0.0) > _THRESH_LOW_THRESHOLD:
-        actions.append(REMEDIATION_MAP["low_threshold"])
 
     if dim_scores.get("physical_survivability", 0.0) > _THRESH_HIGH_PHYSICAL:
         actions.append(REMEDIATION_MAP["high_physical"])
@@ -390,10 +460,10 @@ def _build_plain_english(
 
     if n_skipped == 0:
         return (
-            f"Model scored {kvs:.1f}/10 ({label}) across all five "
+            f"Model scored {kvs:.1f}/10 ({label}) across all six "
             f"vulnerability dimensions."
         )
     return (
-        f"Model scored {kvs:.1f}/10 ({label}) across {n_tested} of five "
+        f"Model scored {kvs:.1f}/10 ({label}) across {n_tested} of six "
         f"vulnerability dimensions; {n_skipped} dimension(s) were not tested."
     )

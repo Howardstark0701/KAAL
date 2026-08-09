@@ -48,7 +48,7 @@ KAAL is a universal AI adversarial robustness auditing framework that supports i
 
 ## KVS Score
 
-KAAL Vulnerability Score — 0.0 to 10.0 across five vulnerability dimensions.
+KAAL Vulnerability Score — 0.0 to 10.0 across six vulnerability dimensions.
 
 | Score | Label | Meaning |
 |-------|-------|---------|

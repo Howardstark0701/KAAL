@@ -10,7 +10,8 @@ resolve_device(override)     → str          what every command calls
 get_defaults(device)         → dict         adjusted tuning defaults
 reset_config()               → None         delete config and re-prompt
 
-Only stdlib + Rich (already a dependency). No torch import here.
+Only stdlib + Rich (already a dependency); torch is imported lazily, only for
+the CUDA check on --device gpu.
 """
 
 from __future__ import annotations
@@ -91,8 +92,28 @@ def resolve_device(cli_override: Optional[str]) -> str:
                 f"[red]Error:[/red] --device must be 'cpu' or 'gpu', got '{cli_override}'"
             )
             raise SystemExit(1)
+        if normalized == "gpu":
+            _ensure_cuda_available()
         return normalized
     return get_device()
+
+
+def _ensure_cuda_available() -> None:
+    """Fail fast with a clear message if 'gpu' was requested but CUDA is absent."""
+    try:
+        import torch
+    except ImportError:
+        console.print(
+            "[red]Error:[/red] --device gpu requires PyTorch, which is not installed."
+        )
+        raise SystemExit(1)
+    if not torch.cuda.is_available():
+        console.print(
+            "[red]Error:[/red] --device gpu requested, but CUDA is not available "
+            "on this machine."
+        )
+        console.print("  Install a CUDA-enabled PyTorch build, or run with --device cpu.")
+        raise SystemExit(1)
 
 
 def get_defaults(device: str) -> dict:

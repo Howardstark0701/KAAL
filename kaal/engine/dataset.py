@@ -222,18 +222,32 @@ def _extract_hw(input_shape: tuple) -> tuple[int, int]:
         TF convention:      (H, W, C) — e.g. (224, 224, 3)
 
     Heuristic: the channel dimension is typically 1, 3, or 4.
+
+    Raises:
+        ValueError: If the shape contains dynamic (None) spatial dimensions
+                    and no explicit input size is available.
     """
     if len(input_shape) == 3:
         c, h, w = input_shape
         # If first dim looks like channels (1/3/4), treat as (C, H, W)
-        if c in (1, 3, 4) and h > 4 and w > 4:
+        if c in (1, 3, 4) and h is not None and h > 4 and w is not None and w > 4:
             return h, w
         # Otherwise treat as (H, W, C)
-        return c, h
+        h, w = c, h
     elif len(input_shape) == 2:
-        return input_shape[0], input_shape[1]
+        h, w = input_shape[0], input_shape[1]
     else:
         raise ValueError(
             f"Cannot parse input_shape {input_shape}. "
             "Expected (C, H, W) or (H, W, C) or (H, W)."
         )
+
+    # Dynamic (None) spatial dimensions — height/width cannot be determined.
+    if h is None or w is None:
+        raise ValueError(
+            f"Model input_shape {input_shape} contains dynamic (None) "
+            "dimensions, so the image height/width cannot be determined. "
+            "Pass --input-size 224x224 to kaal audit to specify an explicit "
+            "input size for dynamic-shape ONNX/TFLite models."
+        )
+    return h, w

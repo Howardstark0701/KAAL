@@ -41,7 +41,7 @@ kvs_res = calculate_kvs(
                  "epsilon_used": fgsm_res.epsilon_used},
     pgd_result={"success_rate": float(pgd_res.success),
                 "epsilon_used": pgd_res.epsilon_used},
-    physical_result=phys_res, min_epsilon=0.03,
+    physical_result=phys_res,
 )
 
 out_dir = os.path.join(tmp, "output")

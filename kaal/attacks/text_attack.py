@@ -112,6 +112,13 @@ class TextAttackResult:
     n_samples: int
     """Number of text samples processed."""
 
+    reached_target: bool
+    """True if any sample's adversarial prediction equals target_class.
+
+    Distinct from success_rate (which counts any class change) — a "successful"
+    attack may have landed on a wrong class other than the requested target.
+    """
+
     plain_english: str
     """One factual sentence describing the outcome. No drama."""
 
@@ -209,6 +216,7 @@ class TextAttacker:
         """
         successes     = 0
         total_conf    = 0.0
+        reached_target = False
         n             = len(texts)
 
         for text in texts:
@@ -280,6 +288,8 @@ class TextAttacker:
 
             if adv_class != orig_class:
                 successes += 1
+            if adv_class == target_class:
+                reached_target = True
             total_conf += conf_on_target
 
         success_rate = successes / n if n > 0 else 0.0
@@ -290,6 +300,7 @@ class TextAttacker:
             success_rate=round(success_rate, 4),
             avg_confidence_on_target=round(avg_conf, 4),
             n_samples=n,
+            reached_target=reached_target,
             plain_english=_build_plain_english(
                 "token substitution (attention-guided synonym replacement)",
                 success_rate, avg_conf, target_class, n,
@@ -332,6 +343,7 @@ class TextAttacker:
         """
         successes  = 0
         total_conf = 0.0
+        reached_target = False
         n          = len(texts)
 
         for text in texts:
@@ -380,6 +392,8 @@ class TextAttacker:
 
             if adv_class != orig_class:
                 successes += 1
+            if adv_class == target_class:
+                reached_target = True
             total_conf += conf_on_target
 
         success_rate = successes / n if n > 0 else 0.0
@@ -390,6 +404,7 @@ class TextAttacker:
             success_rate=round(success_rate, 4),
             avg_confidence_on_target=round(avg_conf, 4),
             n_samples=n,
+            reached_target=reached_target,
             plain_english=_build_plain_english(
                 f"embedding perturbation (L-inf noise eps={epsilon})",
                 success_rate, avg_conf, target_class, n,

@@ -301,6 +301,14 @@ class TestPGDValidation:
         with pytest.raises(ValueError, match="restarts"):
             pgd_attack(kaal_model, random_tensor, epsilon=0.03, steps=5, restarts=0)
 
+    def test_invalid_alpha_zero(self, kaal_model, random_tensor):
+        with pytest.raises(ValueError, match="alpha"):
+            pgd_attack(kaal_model, random_tensor, epsilon=0.03, steps=5, alpha=0.0)
+
+    def test_invalid_alpha_negative(self, kaal_model, random_tensor):
+        with pytest.raises(ValueError, match="alpha"):
+            pgd_attack(kaal_model, random_tensor, epsilon=0.03, steps=5, alpha=-0.01)
+
 
 # ---------------------------------------------------------------------------
 # Dataset-level tests

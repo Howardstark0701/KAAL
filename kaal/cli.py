@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import click
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -58,6 +59,31 @@ _GREEN  = "green"
 # kaal audit
 # =============================================================================
 
+def _parse_input_size(value: str) -> tuple:
+    """Parse --input-size into (H, W) or (C, H, W).
+
+    Accepts "224x224" or "3x224x224". Raises click.UsageError on any
+    other format so the mistake is caught before the model is loaded.
+
+    Raises:
+        click.UsageError: If the format is not HxW or CxHxW.
+    """
+    parts = [p.strip() for p in value.lower().split("x")]
+    try:
+        dims = [int(p) for p in parts]
+    except ValueError:
+        raise click.UsageError(
+            "Invalid --input-size format. Use HxW or CxHxW, e.g. 224x224"
+        )
+    if len(dims) == 2 and all(d > 0 for d in dims):
+        return (dims[0], dims[1])            # (H, W)
+    if len(dims) == 3 and all(d > 0 for d in dims):
+        return (dims[0], dims[1], dims[2])   # (C, H, W)
+    raise click.UsageError(
+        "Invalid --input-size format. Use HxW or CxHxW, e.g. 224x224"
+    )
+
+
 @app.command()
 def audit(
     model: str = typer.Option(..., "--model",   help="Path to model file (.h5/.pt/.onnx/.tflite)"),
@@ -71,6 +97,14 @@ def audit(
     no_gradcam: bool = typer.Option(False, "--no-gradcam", help="Skip GradCAM (faster)"),
     quiet:      bool = typer.Option(False, "--quiet",      help="Suppress progress, show final result only"),
     device: Optional[str] = typer.Option(None, "--device", help="Compute device: cpu or gpu"),
+    n_queries:  int = typer.Option(1000, "--n-queries", help="Black-box attack query budget per image"),
+    targeted:   bool = typer.Option(False, "--targeted", help="Run black-box attack in targeted mode"),
+    target_class: Optional[int] = typer.Option(None, "--target-class",
+                                               help="Target class index (required with --targeted)"),
+    input_size: Optional[str] = typer.Option(
+        None, "--input-size",
+        help="Override model input size as HxW or CxHxW (e.g. 224x224, 3x224x224) "
+             "for dynamic-shape models"),
 ):
     """Run a full adversarial vulnerability audit."""
     start_time = time.time()
@@ -88,6 +122,12 @@ def audit(
     model_path   = Path(model)
     dataset_path = Path(dataset)
 
+    # --input-size must be validated before any other input check so a bad
+    # format raises the UsageError immediately.
+    parsed_input_shape = None
+    if input_size is not None:
+        parsed_input_shape = _parse_input_size(input_size)
+
     if not model_path.exists():
         console.print(f"[red]Error:[/red] Model file not found: {model}")
         raise typer.Exit(1)
@@ -100,6 +140,10 @@ def audit(
     bad = [a for a in attack_list if a not in valid_attacks]
     if bad:
         console.print(f"[red]Error:[/red] Unknown attack(s): {', '.join(bad)}")
+        raise typer.Exit(1)
+
+    if targeted and target_class is None:
+        console.print("[red]Error:[/red] --targeted requires --target-class <class_index>")
         raise typer.Exit(1)
 
     output_dir = Path(output)
@@ -126,8 +170,11 @@ def audit(
         raise typer.Exit(1)
 
     try:
-        kaal_dataset = load_dataset(str(dataset_path),
-                                    input_shape=kaal_model.input_shape)
+        from kaal.engine.utils import resolve_input_shape
+        kaal_dataset = load_dataset(
+            str(dataset_path),
+            input_shape=resolve_input_shape(kaal_model.input_shape, parsed_input_shape),
+        )
     except Exception as e:
         console.print(f"[red]Failed to load dataset:[/red] {e}")
         raise typer.Exit(1)
@@ -148,6 +195,7 @@ def audit(
     pgd_agg       = None
     patch_result  = None
     phys_result   = None
+    blackbox_result = None
     gradcam_cmp   = None
     collapse_path = None
     adv_tensors   = []
@@ -254,6 +302,43 @@ def audit(
             )
             console.print()
 
+    # ── Black-box (NES) ───────────────────────────────────────────────────────
+    if "blackbox" in attack_list:
+        step_num += 1
+        mode = "targeted" if targeted else "untargeted"
+        _print_step(quiet, step_num, total_steps, "Running black-box attack...",
+                    f"ε = {epsilon} | {n_queries} max queries/image | {mode}")
+
+        from kaal.attacks.blackbox import blackbox_attack_dataset
+        from types import SimpleNamespace
+        bb_agg = _run_with_progress(
+            quiet,
+            lambda: blackbox_attack_dataset(
+                kaal_model, kaal_dataset,
+                epsilon=epsilon,
+                max_queries=n_queries,
+                targeted=targeted,
+                target_class=target_class,
+            ),
+            len(kaal_dataset),
+        )
+        # KVS Dim 5 reads `.query_efficiency`, so expose the dataset aggregate
+        # as an object rather than the raw dict.
+        blackbox_result = SimpleNamespace(
+            query_efficiency=bb_agg["avg_query_efficiency"],
+            success_rate=bb_agg["success_rate"],
+            avg_queries_used=bb_agg["avg_queries_used"],
+            total_images=bb_agg["total_images"],
+            successful_attacks=bb_agg["successful_attacks"],
+        )
+        if not quiet:
+            console.print(
+                f"      [green]Success rate: {bb_agg['success_rate']:.0%}[/green]  |  "
+                f"Avg queries: {bb_agg['avg_queries_used']:.0f}  |  "
+                f"Efficiency: {bb_agg['avg_query_efficiency']:.2f}"
+            )
+            console.print()
+
     # ── Explainability + Reports ──────────────────────────────────────────────
     step_num += 1
     _print_step(quiet, step_num, total_steps,
@@ -287,8 +372,9 @@ def audit(
     kvs_result = calculate_kvs(
         fgsm_result=fgsm_agg,
         pgd_result=pgd_agg,
+        patch_result=patch_result,
         physical_result=phys_result,
-        min_epsilon=epsilon,
+        blackbox_result=blackbox_result,
     )
 
     # Fingerprint
@@ -392,9 +478,23 @@ def serve(
         import uvicorn
         from web.backend.main import app as fastapi_app
         uvicorn.run(fastapi_app, host=host, port=port)
-    except ImportError:
-        console.print("[red]Error:[/red] Web dependencies not installed.")
-        console.print("  Run: [bold]pip install -r requirements-web.txt[/bold]")
+    except ImportError as exc:
+        # A KAAL internal module (`web`, `kaal`) that fails to import usually
+        # means we're not running from the project root, so `web/` isn't on
+        # sys.path. Missing third-party deps (e.g. uvicorn) get the standard
+        # "install requirements" message instead.
+        failed_module = getattr(exc, "name", "") or ""
+        if failed_module.startswith(("web", "kaal")):
+            console.print(
+                "[red]Error:[/red] Could not import a KAAL backend module."
+            )
+            console.print(
+                "  Run this command from the project root "
+                "(the directory containing the web/ folder)."
+            )
+        else:
+            console.print("[red]Error:[/red] Web dependencies not installed.")
+            console.print("  Run: [bold]pip install -r requirements-web.txt[/bold]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error starting server:[/red] {e}")
@@ -628,6 +728,10 @@ def certify(
     compliance: bool = typer.Option(False,           "--compliance", help="Also generate a MoD/DRDO-style PDF compliance report"),
     marking:    str = typer.Option("FOR OFFICIAL USE ONLY", "--marking",
                                    help="Classification marking shown on compliance report pages"),
+    input_size: Optional[str] = typer.Option(
+        None, "--input-size",
+        help="Override model input size as HxW or CxHxW (e.g. 224x224, 3x224x224) "
+             "for dynamic-shape models"),
 ):
     """Run a full audit, fingerprint the model, and generate a certification bundle."""
     from kaal.defence.certification import certify_model
@@ -637,6 +741,12 @@ def certify(
 
     model_path   = Path(model)
     dataset_path = Path(dataset)
+
+    # --input-size must be validated before any other input check so a bad
+    # format raises the UsageError immediately.
+    parsed_input_shape = None
+    if input_size is not None:
+        parsed_input_shape = _parse_input_size(input_size)
 
     if not model_path.exists():
         console.print(f"[red]Error:[/red] Model not found: {model}")
@@ -664,6 +774,7 @@ def certify(
             output_dir=output,
             attacks=attack_list,
             org_name=org,
+            input_shape=parsed_input_shape,
         )
 
     # ── Summary table ─────────────────────────────────────────────────────
@@ -837,6 +948,9 @@ def _run_with_progress(quiet: bool, fn, n_items: int):
     if quiet:
         return fn()
 
+    # The progress bar is purely cosmetic: fn() executes synchronously to
+    # completion, then the bar jumps to 100%. It exists for visual feedback
+    # only — it does not reflect incremental progress.
     with Progress(
         TextColumn("      "),
         BarColumn(bar_width=24, style="red", complete_style="bold red"),

@@ -1,8 +1,8 @@
 # KAAL — Core Engine Dependencies
 # Python 3.10.x required
 
-torch==2.2.0
-torchvision==0.17.0
+torch>=2.4
+torchvision>=0.19.0
 tensorflow==2.15.0
 onnx==1.15.0
 onnxruntime==1.17.0

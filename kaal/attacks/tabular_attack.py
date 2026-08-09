@@ -41,6 +41,13 @@ class TabularAttackResult:
     n_samples: int
     """Number of input rows processed."""
 
+    reached_target: bool
+    """True if any row's adversarial prediction equals target_class.
+
+    Distinct from success_rate (which counts any class change) — a "successful"
+    attack may have landed on a wrong class other than the requested target.
+    """
+
     most_perturbed_features: list[str]
     """Top-3 feature names by mean absolute perturbation across all samples."""
 
@@ -205,6 +212,7 @@ class TabularAttacker:
 
         successes         = 0
         total_conf        = 0.0
+        reached_target    = False
         total_perturbation = np.zeros(n_cols, dtype=np.float64)  # |x_adv - x_orig| summed
 
         for row_idx in range(n_samples):
@@ -234,6 +242,8 @@ class TabularAttacker:
 
             if final_class != orig_class:
                 successes += 1
+            if final_class == target_class:
+                reached_target = True
             total_conf        += float(final_proba[target_class])
             total_perturbation += np.abs(x_curr - x_orig)
 
@@ -250,6 +260,7 @@ class TabularAttacker:
             success_rate=round(float(success_rate), 4),
             avg_confidence_on_target=round(float(avg_conf), 4),
             n_samples=n_samples,
+            reached_target=reached_target,
             most_perturbed_features=most_perturbed,
             plain_english=_build_plain_english(
                 success_rate, avg_conf, target_class, n_samples,

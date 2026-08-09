@@ -23,11 +23,10 @@ PGD is strictly stronger than FGSM:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from kaal.engine.loader import KaalModel
@@ -95,6 +94,11 @@ class PGDResult:
 
     adversarial_pil: Image.Image
     """The best adversarial image as a PIL Image (denormalized, for saving/display)."""
+
+    mean_perturbation_linf: float
+    """L∞ norm of the perturbation ‖x_adv − x_orig‖∞ when the attack succeeded,
+    else 0.0. Named "mean" because the dataset aggregate averages this over
+    successful examples for KVS Dim 3a (empirical robustness)."""
 
     plain_english: str
     """One factual sentence describing what happened. No drama, no exclamation marks."""
@@ -168,6 +172,10 @@ def pgd_attack(
         alpha = epsilon / 10.0
     alpha = float(alpha)
 
+    # Reject non-positive step sizes — they silently no-op the attack loop
+    if alpha <= 0:
+        raise ValueError(f"alpha must be positive, got {alpha}")
+
     # Squeeze batch dim
     if image_tensor.dim() == 4:
         image_tensor = image_tensor.squeeze(0)
@@ -179,6 +187,9 @@ def pgd_attack(
     attack_class = target_class if targeted else original_class
 
     # --- Run restarts, keep best result ------------------------------------
+    # best = earliest success across restarts; within a run, best_adversarial
+    # is the first-success tensor — so steps_to_success and the reported
+    # adversarial_confidence describe the same adversarial example.
     best_result: Optional[_PGDRunResult] = None
 
     for restart_idx in range(restarts):
@@ -223,6 +234,14 @@ def pgd_attack(
 
     success = best_result.success
 
+    # L∞ of the applied perturbation (best adversarial − original). Computed
+    # here where both tensors are in hand; no extra inference. Only meaningful
+    # for successful attacks — failed examples store 0.0.
+    perturbation_linf = float(
+        (best_result.adversarial_tensor - image_tensor).abs().amax().item()
+    )
+    mean_perturbation_linf = perturbation_linf if success else 0.0
+
     plain_english = _build_plain_english(
         success=success,
         targeted=targeted,
@@ -251,6 +270,7 @@ def pgd_attack(
         restarts_used=restarts,
         adversarial_tensor=best_result.adversarial_tensor.detach(),
         adversarial_pil=tensor_to_pil(best_result.adversarial_tensor),
+        mean_perturbation_linf=mean_perturbation_linf,
         plain_english=plain_english,
     )
 
@@ -328,8 +348,11 @@ def _pgd_single_run(
 
         if step_success:
             if steps_to_success == -1:
-                steps_to_success = step   # record first success step (1-based)
-            best_adversarial = x.clone()  # keep updating — later steps may be stronger
+                # Record the FIRST success step and its tensor — so
+                # steps_to_success and the reported adversarial_confidence
+                # describe the same adversarial example.
+                steps_to_success = step        # record first success step (1-based)
+                best_adversarial = x.clone()   # store the FIRST-success tensor
 
     # If never succeeded, store the final x as best adversarial attempt
     if steps_to_success == -1:

@@ -182,6 +182,15 @@ def generate_patch(
         ValueError: Invalid parameters.
         NotImplementedError: Model framework doesn't support gradients.
     """
+    # Patch training relies on torch autograd (model._model + loss.backward()).
+    # Other frameworks expose no torch-compatible gradients — fail fast with a
+    # clear message instead of an opaque crash deep in the training loop.
+    if model.framework != "pytorch":
+        raise NotImplementedError(
+            "generate_patch requires a PyTorch model. "
+            "Note: patch_smart also requires PyTorch for gradient-based patch training."
+        )
+
     # --- Validate inputs -----------------------------------------------------
     if not (0.001 <= patch_fraction <= 0.5):
         raise ValueError(
@@ -209,6 +218,8 @@ def generate_patch(
 
     # --- Initialize patch as random noise in [0,1] pixel space ---------------
     torch.manual_seed(seed)
+    import random
+    random.seed(seed)
     # Initialize in pixel space [0,1], then convert to normalized space
     patch_pixels = torch.rand(3, patch_h, patch_w)
     patch_norm = (patch_pixels - IMAGENET_MEAN) / IMAGENET_STD
@@ -222,8 +233,6 @@ def generate_patch(
         raise ValueError("Dataset is empty — cannot train patch.")
 
     # --- Gradient ascent training loop ---------------------------------------
-    target_t = torch.tensor([target_class])
-
     for iteration in range(1, iterations + 1):
         # Sample a random image from the dataset
         tensor, _, _ = random.choice(images)

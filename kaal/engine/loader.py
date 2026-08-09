@@ -143,7 +143,7 @@ class KaalModel:
         import onnxruntime as ort
         import torch.nn.functional as F
 
-        np_img = _ensure_batch(image_tensor).numpy().astype(np.float32)
+        np_img = _ensure_batch(image_tensor).cpu().numpy().astype(np.float32)
         input_name = self._model.get_inputs()[0].name
         outputs = self._model.run(None, {input_name: np_img})
         logits = torch.tensor(outputs[0])
@@ -219,9 +219,12 @@ class KaalModel:
         self._model.eval()
         inp = _ensure_batch(image_tensor).clone().requires_grad_(True)
         logits = self._model(inp)
-        loss = F.cross_entropy(logits, torch.tensor([target_class]))
+        loss = F.cross_entropy(
+            logits, torch.tensor([target_class], device=image_tensor.device)
+        )
         self._model.zero_grad()
         loss.backward()
+        assert inp.shape[0] == 1, "gradient() expects a single image, not a batch"
         grad = inp.grad.data.squeeze(0)  # remove batch dim
         return grad
 
@@ -325,7 +328,18 @@ def _load_pytorch(
     """Load PyTorch .pt / .pth model."""
     try:
         # Try loading as full model first (torch.save(model, path))
-        model = torch.load(path, map_location="cpu", weights_only=False)
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            import warnings
+            warnings.warn(
+                f"Could not load {path} with weights_only=True (may contain custom objects). "
+                "Falling back to weights_only=False — only load model files you trust.",
+                UserWarning,
+                stacklevel=2,
+            )
+            state = torch.load(path, map_location="cpu", weights_only=False)
+        model = state
     except Exception:
         raise RuntimeError(
             f"Could not load PyTorch model from '{path}'.\n"

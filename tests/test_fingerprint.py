@@ -32,11 +32,12 @@ def _make_kvs(scores: dict, score: float = 5.0) -> KVSResult:
 @pytest.fixture(scope="module")
 def full_kvs():
     return _make_kvs({
-        "fgsm_susceptibility":    8.0,
-        "pgd_susceptibility":     9.0,
-        "physical_survivability": 5.0,
-        "blackbox_efficiency":    4.0,
-        "perturbation_threshold": 7.0,
+        "fgsm_susceptibility":        8.0,
+        "pgd_susceptibility":         9.0,
+        "physical_survivability":     5.0,
+        "blackbox_efficiency":        4.0,
+        "empirical_robustness":       7.0,
+        "adversarial_overconfidence": 6.0,
     }, score=7.2)
 
 
@@ -53,11 +54,12 @@ def partial_kvs():
 @pytest.fixture(scope="module")
 def comparison_kvs():
     return _make_kvs({
-        "fgsm_susceptibility":    3.0,
-        "pgd_susceptibility":     4.0,
-        "physical_survivability": 2.0,
-        "blackbox_efficiency":    1.5,
-        "perturbation_threshold": 3.5,
+        "fgsm_susceptibility":        3.0,
+        "pgd_susceptibility":         4.0,
+        "physical_survivability":     2.0,
+        "blackbox_efficiency":        1.5,
+        "empirical_robustness":       3.5,
+        "adversarial_overconfidence": 2.5,
     }, score=2.8)
 
 
@@ -72,9 +74,9 @@ def zero_kvs():
 
 class TestExtractScores:
 
-    def test_returns_list_of_five(self, full_kvs):
+    def test_returns_list_of_six(self, full_kvs):
         scores = _extract_scores(full_kvs)
-        assert len(scores) == 5
+        assert len(scores) == 6
 
     def test_values_match_dimension_scores(self, full_kvs):
         scores = _extract_scores(full_kvs)
@@ -83,9 +85,10 @@ class TestExtractScores:
 
     def test_missing_dims_default_to_zero(self, partial_kvs):
         scores = _extract_scores(partial_kvs)
-        # blackbox_efficiency and perturbation_threshold are missing → 0.0
+        # blackbox_efficiency and the two new dims are missing → 0.0
         assert scores[3] == 0.0   # blackbox_efficiency
-        assert scores[4] == 0.0   # perturbation_threshold
+        assert scores[4] == 0.0   # empirical_robustness
+        assert scores[5] == 0.0   # adversarial_overconfidence
 
     def test_all_zeros_for_empty(self):
         from kaal.scoring.kvs import KVSResult, get_kvs_label, get_kvs_color
@@ -185,8 +188,8 @@ class TestComparisonMode:
 
 class TestAxesDefinition:
 
-    def test_five_axes_defined(self):
-        assert len(_AXES) == 5
+    def test_six_axes_defined(self):
+        assert len(_AXES) == 6
 
     def test_axes_contain_all_kvs_dimensions(self):
         expected = {
@@ -194,7 +197,8 @@ class TestAxesDefinition:
             "pgd_susceptibility",
             "physical_survivability",
             "blackbox_efficiency",
-            "perturbation_threshold",
+            "empirical_robustness",
+            "adversarial_overconfidence",
         }
         assert set(_AXES) == expected
 
@@ -211,7 +215,6 @@ class TestKVSToFingerprintPipeline:
             fgsm_success_rate=0.80,
             pgd_result={"success_rate": 0.90, "epsilon_used": 0.03},
             physical_result=type("R", (), {"overall_survival_rate": 0.50})(),
-            min_epsilon=0.03,
         )
         out = str(tmp_path / "pipeline.png")
         path = generate_fingerprint(kvs, "PipelineModel", out)

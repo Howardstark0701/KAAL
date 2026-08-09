@@ -16,7 +16,6 @@ kvs = calculate_kvs(
     pgd_result={"success_rate": 0.94, "epsilon_used": 0.03},
     physical_result=type("R", (), {"overall_survival_rate": 0.51})(),
     blackbox_result=type("B", (), {"query_efficiency": 0.48})(),
-    min_epsilon=0.03,
 )
 print("Score           :", kvs.score)
 print("Label           :", kvs.label)
@@ -31,7 +30,7 @@ assert kvs.label == get_kvs_label(kvs.score)
 assert kvs.color == get_kvs_color(kvs.score)
 assert "!" not in kvs.plain_english
 assert kvs.plain_english.endswith(".")
-assert len(kvs.dimensions_tested) + len(kvs.dimensions_skipped) == 5
+assert len(kvs.dimensions_tested) + len(kvs.dimensions_skipped) == 6
 
 # ── Test 2: label boundaries ─────────────────────────────────────────────────
 print("\n── Label boundaries ──────────────────────────────────────────────")
@@ -70,7 +69,6 @@ kvs2 = calculate_kvs(
     fgsm_result={"success_rate": 0.30, "epsilon_used": 0.10},
     pgd_result={"success_rate": 0.40, "epsilon_used": 0.10},
     physical_result=type("R", (), {"overall_survival_rate": 0.20})(),
-    min_epsilon=0.10,
 )
 print("Model B score   :", kvs2.score, kvs2.label)
 cmp_path = os.path.join(tmp, "compare.png")
@@ -82,7 +80,7 @@ assert os.path.exists(path2)
 # ── Test 6: remediation map ───────────────────────────────────────────────────
 print("\n── Remediation map ───────────────────────────────────────────────")
 print("Keys:", list(REMEDIATION_MAP.keys()))
-assert len(REMEDIATION_MAP) == 5
+assert len(REMEDIATION_MAP) == 4
 
 print("\nOutputs saved to:", tmp)
 print("\nPhase 7 PRD verification: PASSED")

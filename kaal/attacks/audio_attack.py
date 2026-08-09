@@ -72,6 +72,13 @@ class AudioAttackResult:
     n_samples: int
     """Number of audio clips processed."""
 
+    reached_target: bool
+    """True if any clip's adversarial prediction equals target_class.
+
+    Distinct from success_rate (which counts any class change) — a "successful"
+    attack may have landed on a wrong class other than the requested target.
+    """
+
     plain_english: str
     """One factual sentence describing the outcome. No drama."""
 
@@ -193,6 +200,7 @@ class AudioAttacker:
         successes     = 0
         total_conf    = 0.0
         total_snr_db  = 0.0
+        reached_target = False
         n             = len(audio_arrays)
 
         for audio in audio_arrays:
@@ -218,6 +226,8 @@ class AudioAttacker:
 
             if final_class != orig_class:
                 successes += 1
+            if final_class == target_class:
+                reached_target = True
             total_conf   += float(final_proba[target_class])
 
             # ── SNR ───────────────────────────────────────────────────────
@@ -232,6 +242,7 @@ class AudioAttacker:
             avg_confidence_on_target=round(float(avg_conf), 4),
             avg_snr_db=round(float(avg_snr_db), 2),
             n_samples=n,
+            reached_target=reached_target,
             plain_english=_build_plain_english(
                 success_rate, avg_conf, avg_snr_db,
                 target_class, n, epsilon, n_iterations,
@@ -268,10 +279,18 @@ class AudioAttacker:
         x_t = torch.tensor(x, dtype=torch.float32).unsqueeze(0).requires_grad_(True)
 
         # model is a torch.nn.Module — call it directly
-        logits = self._model(x_t)                        # (1, n_classes) or (n_classes,)
-        if logits.dim() == 1:
-            logits = logits.unsqueeze(0)
-        probs = F.softmax(logits, dim=1)
+        output = self._model(x_t)                        # (1, n_classes) or (n_classes,)
+        if output.dim() == 1:
+            output = output.unsqueeze(0)
+
+        # NOTE: _call_model() owns the logits→probabilities transform
+        # (F.softmax plus clip/normalise). Gradient estimators must NOT
+        # re-apply softmax here — doing so would compute gradients of
+        # softmax(softmax(logits)), i.e. a different function than the one
+        # _call_model()/_fd_gradient() evaluate. The model output is already
+        # a probability distribution per the model_callable contract, so use
+        # it directly as the NLL target.
+        probs = output
         loss  = -torch.log(probs[0, target_class] + 1e-12)
         loss.backward()
 

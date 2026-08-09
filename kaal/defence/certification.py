@@ -27,6 +27,35 @@ from pathlib import Path
 from typing import Optional
 
 from kaal.defence.fingerprint import fingerprint_model, ModelFingerprint
+from kaal.engine.utils import resolve_input_shape
+
+
+# ---------------------------------------------------------------------------
+# Attack-name validation
+# ---------------------------------------------------------------------------
+
+_VALID_ATTACKS = {"fgsm", "pgd", "patch", "blackbox", "physical"}
+
+
+def _validate_attacks(attacks) -> set[str]:
+    """Validate attack names against the supported set.
+
+    Raises:
+        ValueError: If any name is unknown, or the set is empty.
+    """
+    attack_set = {a.lower().strip() for a in attacks if a.strip()}
+    unknown = attack_set - _VALID_ATTACKS
+    if unknown:
+        raise ValueError(
+            f"Unknown attack name(s): {', '.join(sorted(unknown))}. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    if not attack_set:
+        raise ValueError(
+            "No attacks specified. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    return attack_set
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +125,7 @@ def certify_model(
     output_dir:  str = "./kaal_cert/",
     attacks:     list[str] = None,
     org_name:    str = "Unknown",
+    input_shape: Optional[tuple] = None,
 ) -> CertificationBundle:
     """Run a full KAAL audit and produce a certification bundle.
 
@@ -113,6 +143,10 @@ def certify_model(
         output_dir:  Where to write badge.svg and certificate.json.
         attacks:     List of attack names. Default: ["fgsm", "pgd", "patch"].
         org_name:    Organisation name shown on the badge and certificate.
+        input_shape: Optional explicit (H, W) or (C, H, W) override for the
+                     dataset, for dynamic-shape ONNX/TFLite models whose own
+                     input_shape has None spatial dims. Defaults to the model's
+                     own input shape.
 
     Returns:
         CertificationBundle with all certification data.
@@ -138,12 +172,14 @@ def certify_model(
 
     # ── Step 2: Primary audit ─────────────────────────────────────────────
     print(f"[KAAL Certify] Primary audit ({', '.join(attacks).upper()})…")
-    kvs1, fgsm_rate, pgd_rate, patch_rate = _run_audit(model_path, dataset_dir, attacks)
+    kvs1, fgsm_rate, pgd_rate, patch_rate = _run_audit(
+        model_path, dataset_dir, attacks, input_shape=input_shape
+    )
     audit_ts = datetime.now(timezone.utc).isoformat()
 
     # ── Step 3: Re-audit for determinism ─────────────────────────────────
     print("[KAAL Certify] Re-audit (determinism check)…")
-    kvs2, _, _, _ = _run_audit(model_path, dataset_dir, attacks)
+    kvs2, _, _, _ = _run_audit(model_path, dataset_dir, attacks, input_shape=input_shape)
 
     is_deterministic = abs(kvs1.score - kvs2.score) <= 0.1
 
@@ -198,37 +234,34 @@ def certify_model(
 # Internal: audit runner (thin wrapper over existing KAAL attack modules)
 # ---------------------------------------------------------------------------
 
-def _run_audit(model_path: str, dataset_dir: str, attacks: list[str]):
+def _run_audit(model_path: str, dataset_dir: str, attacks: list[str],
+               input_shape: Optional[tuple] = None):
     """Run FGSM/PGD/patch attacks and return (KVSResult, fgsm_rate, pgd_rate, patch_rate)."""
     from kaal.engine.loader import load_model
     from kaal.engine.dataset import load_dataset
     from kaal.scoring.kvs import calculate_kvs
 
-    attack_set = {a.lower().strip() for a in attacks}
+    attack_set = _validate_attacks(attacks)
 
     km = load_model(model_path)
-    ds = load_dataset(dataset_dir, input_shape=km.input_shape, max_images=50)
+    ds = load_dataset(
+        dataset_dir,
+        input_shape=resolve_input_shape(km.input_shape, input_shape),
+        max_images=50,
+    )
 
     fgsm_agg     = None
     pgd_agg      = None
     patch_result = None
-    adv_tensors: list = []
-    orig_classes: list = []
+    blackbox_result = None
 
     if "fgsm" in attack_set:
         from kaal.attacks.fgsm import fgsm_attack_dataset
         fgsm_agg = fgsm_attack_dataset(km, ds, epsilon=0.03)
-        for r in fgsm_agg["results"]:
-            adv_tensors.append(r.adversarial_tensor)
-            orig_classes.append(r.original_class)
 
     if "pgd" in attack_set:
         from kaal.attacks.pgd import pgd_attack_dataset
         pgd_agg = pgd_attack_dataset(km, ds, epsilon=0.03, steps=20)
-        if not adv_tensors:
-            for r in pgd_agg["results"]:
-                adv_tensors.append(r.adversarial_tensor)
-                orig_classes.append(r.original_class)
 
     if "patch" in attack_set:
         from kaal.attacks.patch import generate_patch
@@ -240,10 +273,25 @@ def _run_audit(model_path: str, dataset_dir: str, attacks: list[str]):
         except Exception:
             pass
 
+    if "blackbox" in attack_set:
+        from kaal.attacks.blackbox import blackbox_attack_dataset
+        try:
+            bb_agg = blackbox_attack_dataset(km, ds, epsilon=0.03, max_images=50)
+            from types import SimpleNamespace
+            # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
+            # aggregate as an object rather than the raw dict.
+            blackbox_result = SimpleNamespace(
+                query_efficiency=bb_agg["avg_query_efficiency"],
+                success_rate=bb_agg["success_rate"],
+            )
+        except Exception:
+            pass
+
     kvs = calculate_kvs(
         fgsm_result=fgsm_agg,
         pgd_result=pgd_agg,
-        min_epsilon=0.03,
+        patch_result=patch_result,
+        blackbox_result=blackbox_result,
     )
 
     fgsm_rate  = fgsm_agg["success_rate"]  if fgsm_agg   else None

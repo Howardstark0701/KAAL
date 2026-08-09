@@ -40,6 +40,45 @@ from web.backend.models import (
 
 router = APIRouter()
 
+
+def _job_error_message(exc: Exception) -> str:
+    """Client-safe one-line message for a job's error field.
+
+    The full traceback is logged server-side by callers; storing a single
+    collapsed line keeps internal paths and stack frames out of
+    GET /api/audit/status/{job_id}.
+    """
+    message = " ".join(str(exc).strip().split()) or exc.__class__.__name__
+    return message[:300]
+
+
+# ---------------------------------------------------------------------------
+# Attack-name validation
+# ---------------------------------------------------------------------------
+
+_VALID_ATTACKS = {"fgsm", "pgd", "patch", "blackbox", "physical"}
+
+
+def _validate_attacks(attacks) -> set[str]:
+    """Validate attack names against the supported set.
+
+    Raises:
+        ValueError: If any name is unknown, or the set is empty.
+    """
+    attack_set = {a.lower().strip() for a in attacks if a.strip()}
+    unknown = attack_set - _VALID_ATTACKS
+    if unknown:
+        raise ValueError(
+            f"Unknown attack name(s): {', '.join(sorted(unknown))}. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    if not attack_set:
+        raise ValueError(
+            "No attacks specified. "
+            f"Supported attacks: {', '.join(sorted(_VALID_ATTACKS))}."
+        )
+    return attack_set
+
 # Uploads land in a temp dir per server lifetime
 _UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="kaal_uploads_"))
 _OUTPUT_DIR = Path(tempfile.mkdtemp(prefix="kaal_outputs_"))
@@ -52,7 +91,12 @@ _OUTPUT_DIR = Path(tempfile.mkdtemp(prefix="kaal_outputs_"))
 @router.post("/api/upload/model", response_model=ModelUploadResponse)
 async def upload_model(file: UploadFile = File(...)):
     """Accept a model file upload, sniff the framework, return model_id."""
-    suffix = Path(file.filename).suffix.lower()
+    # Sanitize client-supplied filename: keep only the basename so a
+    # name like "../../x.pt" cannot traverse out of the upload dir.
+    safe_name = Path(file.filename).name if file.filename else ""
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    suffix = Path(safe_name).suffix.lower()
     supported = {".h5", ".keras", ".pt", ".pth", ".onnx", ".tflite"}
     if suffix not in supported:
         raise HTTPException(
@@ -62,7 +106,7 @@ async def upload_model(file: UploadFile = File(...)):
         )
 
     # Save to disk
-    save_path = _UPLOAD_DIR / f"{file.filename}"
+    save_path = _UPLOAD_DIR / safe_name
     save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "wb") as f_out:
         shutil.copyfileobj(file.file, f_out)
@@ -97,11 +141,16 @@ async def upload_dataset(files: list[UploadFile] = File(...)):
 
     formats: dict[str, int] = {}
     for upload in files:
-        suffix = Path(upload.filename).suffix.lower()
+        # Sanitize each client-supplied filename: keep only the basename so
+        # a name like "../../x.jpg" cannot traverse out of the dataset dir.
+        safe_name = Path(upload.filename).name if upload.filename else ""
+        if not safe_name:
+            raise HTTPException(status_code=400, detail="Invalid filename.")
+        suffix = Path(safe_name).suffix.lower()
         allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         if suffix not in allowed:
             continue
-        dest = dataset_dir / upload.filename
+        dest = dataset_dir / safe_name
         with open(dest, "wb") as f_out:
             shutil.copyfileobj(upload.file, f_out)
         formats[suffix] = formats.get(suffix, 0) + 1
@@ -331,8 +380,10 @@ def _run_audit_pipeline(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         fgsm_agg = pgd_agg = patch_result = phys_result = None
+        blackbox_result = None
         adv_tensors: list = []
         orig_classes: list = []
+        _validate_attacks(attacks)
         attack_list = [a.lower() for a in attacks]
         n_attacks = len(attack_list)
         pct_per_step = 70 // max(n_attacks, 1)
@@ -367,11 +418,16 @@ def _run_audit_pipeline(
             job_store.update(job_id, progress_pct=current_pct,
                              current_step="Generating adversarial patch")
             from kaal.attacks.patch import generate_patch
-            patch_result = generate_patch(
-                kaal_model, kaal_dataset,
-                target_class=0, patch_fraction=0.05,
-                iterations=500, output_dir=str(output_dir), verbose=False,
-            )
+            try:
+                patch_result = generate_patch(
+                    kaal_model, kaal_dataset,
+                    target_class=0, patch_fraction=0.05,
+                    iterations=500, output_dir=str(output_dir), verbose=False,
+                )
+            except Exception as exc:
+                # Patch requires a PyTorch model; skip it without failing the
+                # whole job (FGSM/PGD may have already succeeded).
+                print(f"[KAAL] Patch skipped: {exc}")
             current_pct += pct_per_step
 
         # Physical
@@ -384,6 +440,29 @@ def _run_audit_pipeline(
                 adv_tensors[:min(len(adv_tensors), 20)],
                 orig_classes[:min(len(orig_classes), 20)],
             )
+            current_pct += pct_per_step
+
+        # Black-box (NES)
+        if "blackbox" in attack_list:
+            job_store.update(job_id, progress_pct=current_pct,
+                             current_step="Running black-box attack")
+            from kaal.attacks.blackbox import blackbox_attack_dataset
+            try:
+                bb_agg = blackbox_attack_dataset(
+                    kaal_model, kaal_dataset,
+                    epsilon=epsilon,
+                )
+                from types import SimpleNamespace
+                # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
+                # aggregate as an object rather than the raw dict.
+                blackbox_result = SimpleNamespace(
+                    query_efficiency=bb_agg["avg_query_efficiency"],
+                    success_rate=bb_agg["success_rate"],
+                )
+            except Exception as exc:
+                # Black-box is best-effort; skip without failing the whole job
+                # (FGSM/PGD may have already succeeded).
+                print(f"[KAAL] Black-box skipped: {exc}")
             current_pct += pct_per_step
 
         # Explainability + scoring + reports
@@ -404,8 +483,9 @@ def _run_audit_pipeline(
         kvs_result = calculate_kvs(
             fgsm_result=fgsm_agg,
             pgd_result=pgd_agg,
+            patch_result=patch_result,
             physical_result=phys_result,
-            min_epsilon=epsilon,
+            blackbox_result=blackbox_result,
         )
 
         try:
@@ -487,7 +567,9 @@ def _run_audit_pipeline(
         )
 
     except Exception as exc:
-        job_store.fail(job_id, error=str(exc) + "\n" + traceback.format_exc())
+        print(f"[KAAL] Audit job {job_id} failed: {exc}")
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        job_store.fail(job_id, error=_job_error_message(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -544,4 +626,6 @@ def _run_patch_pipeline(
         )
 
     except Exception as exc:
-        job_store.fail(job_id, error=str(exc))
+        print(f"[KAAL] Patch job {job_id} failed: {exc}")
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        job_store.fail(job_id, error=_job_error_message(exc))

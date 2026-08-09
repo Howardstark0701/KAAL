@@ -105,7 +105,6 @@ def full_kvs_result():
         fgsm_result=_fgsm_dict(0.80, epsilon=0.03),
         pgd_result=_pgd_dict(0.90, epsilon=0.03),
         physical_result=_MockPhysical(0.50),
-        min_epsilon=0.03,
     )
 
 
@@ -145,8 +144,8 @@ class TestKVSResultStructure:
     def test_dimensions_skipped_is_list(self, full_kvs_result):
         assert isinstance(full_kvs_result.dimensions_skipped, list)
 
-    def test_tested_plus_skipped_equals_five(self, full_kvs_result):
-        assert len(full_kvs_result.dimensions_tested) + len(full_kvs_result.dimensions_skipped) == 5
+    def test_tested_plus_skipped_equals_six(self, full_kvs_result):
+        assert len(full_kvs_result.dimensions_tested) + len(full_kvs_result.dimensions_skipped) == 6
 
     def test_plain_english_is_one_sentence(self, full_kvs_result):
         text = full_kvs_result.plain_english
@@ -164,22 +163,25 @@ class TestKVSResultStructure:
 
 class TestKVSFormula:
 
-    def test_full_formula_all_five_dims(self):
-        """Manual calculation with all five dimensions."""
-        # dim1 = 0.8*10 = 8.0  weight 0.20  → 1.60
-        # dim2 = 0.9*10 = 9.0  weight 0.30  → 2.70
-        # dim3 = (1-0.03)*10 = 9.7  weight 0.20  → 1.94
-        # dim4 = 0.5*10 = 5.0  weight 0.20  → 1.00
-        # dim5 = 0.6*10 = 6.0  weight 0.10  → 0.60
-        # raw = 1.60+2.70+1.94+1.00+0.60 = 7.84 → rounded = 7.8
+    def test_full_formula_all_available_dims(self):
+        """Manual calculation with all four data-carrying dimensions.
+
+        success_rate-only dicts carry no per-example perturbation/confidence
+        data, so Dim 3a and Dim 3b are skipped and weights renormalise over
+        fgsm/pgd/physical/blackbox (0.20+0.30+0.20+0.10 = 0.80).
+        """
+        # dim1 = 0.8*10 = 8.0  weight 0.20/0.80 = 0.250 → 2.000
+        # dim2 = 0.9*10 = 9.0  weight 0.30/0.80 = 0.375 → 3.375
+        # dim4 = 0.5*10 = 5.0  weight 0.20/0.80 = 0.250 → 1.250
+        # dim5 = 0.6*10 = 6.0  weight 0.10/0.80 = 0.125 → 0.750
+        # raw = 2.000+3.375+1.250+0.750 = 7.375 → rounded = 7.4
         result = calculate_kvs(
             fgsm_result=_fgsm_dict(0.80),
             pgd_result=_pgd_dict(0.90),
             physical_result=_MockPhysical(0.50),
             blackbox_result=_MockBlackbox(0.60),
-            min_epsilon=0.03,
         )
-        assert result.score == pytest.approx(7.8, abs=0.15)
+        assert result.score == pytest.approx(7.4, abs=0.15)
 
     def test_score_clamped_to_ten(self):
         result = calculate_kvs(
@@ -187,7 +189,6 @@ class TestKVSFormula:
             pgd_result=_pgd_dict(1.0),
             physical_result=_MockPhysical(1.0),
             blackbox_result=_MockBlackbox(1.0),
-            min_epsilon=0.001,
         )
         assert result.score <= 10.0
 
@@ -197,22 +198,57 @@ class TestKVSFormula:
             pgd_result=_pgd_dict(0.0),
             physical_result=_MockPhysical(0.0),
             blackbox_result=_MockBlackbox(0.0),
-            min_epsilon=1.0,
         )
         assert result.score >= 0.0
 
-    def test_min_epsilon_clamped_low(self):
-        """epsilon < 0.001 should be clamped to 0.001 → dim3 score ≈ 9.99."""
-        result = calculate_kvs(min_epsilon=0.00001, fgsm_success_rate=0.0)
-        dim3 = result.dimension_scores.get("perturbation_threshold", 0.0)
-        assert dim3 > 9.9
+    def test_empirical_robustness_score(self):
+        """Dim3a: mean ‖x_adv−x‖∞ over successes / epsilon, capped at 1.0."""
+        pgd = {
+            "success_rate": 1.0,
+            "epsilon_used": 0.1,
+            "results": [
+                type("R", (), {"success": True, "mean_perturbation_linf": 0.05})(),
+                type("R", (), {"success": True, "mean_perturbation_linf": 0.05})(),
+            ],
+        }
+        result = calculate_kvs(pgd_result=pgd)
+        assert result.dimension_scores["empirical_robustness"] == pytest.approx(5.0)
 
-    def test_min_epsilon_clamped_high(self):
-        """epsilon > 1.0 should be clamped to 1.0 → dim3 score = 0.0."""
-        result = calculate_kvs(min_epsilon=5.0, fgsm_success_rate=0.0)
-        dim3 = result.dimension_scores.get("perturbation_threshold", None)
-        if dim3 is not None:
-            assert dim3 == pytest.approx(0.0, abs=0.01)
+    def test_empirical_robustness_no_successes_is_max(self):
+        """Dim3a: attack ran but zero successes → 10.0."""
+        pgd = {
+            "success_rate": 0.0,
+            "epsilon_used": 0.1,
+            "results": [type("R", (), {"success": False, "mean_perturbation_linf": 0.0})()],
+        }
+        result = calculate_kvs(pgd_result=pgd)
+        assert result.dimension_scores["empirical_robustness"] == pytest.approx(10.0)
+
+    def test_empirical_robustness_skipped_without_data(self):
+        """Dim3a: success_rate-only dicts carry no per-example data → skipped."""
+        result = calculate_kvs(fgsm_success_rate=0.5, pgd_success_rate=0.5)
+        assert "empirical_robustness" in result.dimensions_skipped
+
+    def test_adversarial_overconfidence_score(self):
+        """Dim3b: mean adversarial_confidence over successes × 10."""
+        fgsm = {
+            "success_rate": 1.0,
+            "results": [
+                type("R", (), {"success": True, "adversarial_confidence": 0.9})(),
+                type("R", (), {"success": True, "adversarial_confidence": 0.7})(),
+            ],
+        }
+        result = calculate_kvs(fgsm_result=fgsm)
+        assert result.dimension_scores["adversarial_overconfidence"] == pytest.approx(8.0)
+
+    def test_adversarial_overconfidence_no_successes_is_zero(self):
+        """Dim3b: attack data present but zero successes → 0.0."""
+        fgsm = {
+            "success_rate": 0.0,
+            "results": [type("R", (), {"success": False, "adversarial_confidence": 0.0})()],
+        }
+        result = calculate_kvs(fgsm_result=fgsm)
+        assert result.dimension_scores["adversarial_overconfidence"] == pytest.approx(0.0)
 
     def test_weight_redistribution_when_dims_skipped(self):
         """Score with missing blackbox dim should still be [0,10]."""
@@ -220,13 +256,13 @@ class TestKVSFormula:
             fgsm_result=_fgsm_dict(0.8),
             pgd_result=_pgd_dict(0.8),
             physical_result=_MockPhysical(0.8),
-            # blackbox skipped, min_epsilon auto-inferred from fgsm dict
+            # blackbox skipped; 3a/3b also skip (no per-example data in dicts)
         )
         assert 0.0 <= result.score <= 10.0
         # blackbox_efficiency must be in skipped
         assert "blackbox_efficiency" in result.dimensions_skipped
-        # tested + skipped still = 5
-        assert len(result.dimensions_tested) + len(result.dimensions_skipped) == 5
+        # tested + skipped still = 6
+        assert len(result.dimensions_tested) + len(result.dimensions_skipped) == 6
 
     def test_single_dim_produces_valid_score(self):
         result = calculate_kvs(fgsm_success_rate=0.5)
@@ -237,7 +273,7 @@ class TestKVSFormula:
         result = calculate_kvs()
         assert result.score == 0.0
         assert result.dimensions_tested == []
-        assert len(result.dimensions_skipped) == 5
+        assert len(result.dimensions_skipped) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -253,13 +289,6 @@ class TestRemediation:
     def test_high_pgd_triggers_remediation(self):
         result = calculate_kvs(pgd_result=_pgd_dict(0.70))  # dim2 = 7.0 > 6.0
         assert any("adversarial training" in r for r in result.remediation)
-
-    def test_low_threshold_triggers_remediation(self):
-        # dim3 = (1 - 0.01) * 10 = 9.9 > 7.0
-        result = calculate_kvs(min_epsilon=0.01, fgsm_success_rate=0.0)
-        dim3 = result.dimension_scores.get("perturbation_threshold", 0.0)
-        if dim3 > 7.0:
-            assert any("ensemble" in r or "certified" in r for r in result.remediation)
 
     def test_high_physical_triggers_remediation(self):
         result = calculate_kvs(physical_result=_MockPhysical(0.80))  # dim4 = 8.0 > 6.0
@@ -284,8 +313,8 @@ class TestRemediation:
         )
         assert len(robust.remediation) <= len(high_risk.remediation)
 
-    def test_remediation_map_has_five_keys(self):
-        assert len(REMEDIATION_MAP) == 5
+    def test_remediation_map_has_four_keys(self):
+        assert len(REMEDIATION_MAP) == 4
 
     def test_remediation_map_values_are_strings(self):
         for v in REMEDIATION_MAP.values():

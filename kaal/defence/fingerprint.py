@@ -319,7 +319,18 @@ def _compute_weight_hash(path: Path) -> str:
         return "N/A (torch not available)"
 
     try:
-        obj = torch.load(str(path), map_location="cpu", weights_only=False)
+        try:
+            state = torch.load(str(path), map_location="cpu", weights_only=True)
+        except Exception:
+            import warnings
+            warnings.warn(
+                f"Could not load {path} with weights_only=True (may contain custom objects). "
+                "Falling back to weights_only=False — only load model files you trust.",
+                UserWarning,
+                stacklevel=2,
+            )
+            state = torch.load(str(path), map_location="cpu", weights_only=False)
+        obj = state
     except Exception as e:
         return f"N/A (weight extraction failed: {e})"
 

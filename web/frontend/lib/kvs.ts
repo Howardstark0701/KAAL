@@ -30,17 +30,19 @@ export function formatScore(score: number): string {
 
 // Canonical dimension display names
 export const DIM_LABELS: Record<string, string> = {
-  fgsm_susceptibility:    'FGSM',
-  pgd_susceptibility:     'PGD',
-  perturbation_threshold: 'Perturbation Threshold',
-  physical_survivability: 'Physical',
-  blackbox_efficiency:    'Black-Box',
+  fgsm_susceptibility:         'FGSM',
+  pgd_susceptibility:          'PGD',
+  empirical_robustness:        'Empirical Robustness',
+  adversarial_overconfidence:  'Adversarial Confidence',
+  physical_survivability:      'Physical',
+  blackbox_efficiency:         'Black-Box',
 };
 
 export const DIM_ORDER = [
   'fgsm_susceptibility',
   'pgd_susceptibility',
-  'perturbation_threshold',
+  'empirical_robustness',
+  'adversarial_overconfidence',
   'physical_survivability',
   'blackbox_efficiency',
 ];
