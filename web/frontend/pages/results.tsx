@@ -8,7 +8,7 @@ import ProgressBar from '../components/ProgressBar';
 import KVSGauge from '../components/KVSGauge';
 import RiskBadge from '../components/RiskBadge';
 import { useToast } from '../components/ErrorToast';
-import { connectProgressWS, getAuditResult, pdfReportUrl, patchPngUrl } from '../lib/api';
+import { connectProgressWS, getAuditResult, pdfReportUrl, patchPngUrl, ApiError } from '../lib/api';
 import { DIM_LABELS, DIM_ORDER } from '../lib/kvs';
 import type { AuditResult, WSMessage } from '../lib/types';
 
@@ -73,6 +73,7 @@ export default function ResultsPage() {
   const [done,     setDone]     = useState(false);
   const [failed,   setFailed]   = useState(false);
   const [errMsg,   setErrMsg]   = useState('');
+  const [notFound, setNotFound] = useState(false);
   const [result,   setResult]   = useState<AuditResult | null>(null);
 
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -84,7 +85,12 @@ export default function ResultsPage() {
       jobId,
       async (msg: WSMessage) => {
         if (msg.type === 'error') {
-          setFailed(true);
+          // Backend sends "Job not found." when a job was cleaned up by the
+          // 2-hour expiry (or never existed) — surface that clearly instead
+          // of framing it as a generic audit failure.
+          const isMissing = /not found/i.test(msg.message);
+          setNotFound(isMissing);
+          setFailed(!isMissing);
           setErrMsg(msg.message);
           return;
         }
@@ -92,12 +98,17 @@ export default function ResultsPage() {
         setStep(msg.step_name || msg.message);
 
         if (msg.type === 'done') {
-          setDone(true);
           try {
             const r = await getAuditResult(jobId);
             setResult(r);
+            setDone(true);
           } catch (e) {
-            showError(`Failed to load result: ${e}`);
+            if (e instanceof ApiError && e.status === 404) {
+              setNotFound(true);
+            } else {
+              setDone(true);
+              showError(`Failed to load result: ${e}`);
+            }
           }
         }
       },
@@ -142,7 +153,7 @@ export default function ResultsPage() {
         </div>
 
         {/* Progress phase */}
-        {!done && !failed && (
+        {!done && !failed && !notFound && (
           <>
             <div className="bg-[#111] border border-[#222] rounded-lg p-6 mb-4">
               <p className="text-sm text-gray-300 mb-3">Audit in progress…</p>
@@ -150,6 +161,20 @@ export default function ResultsPage() {
             </div>
             <ResultsSkeleton />
           </>
+        )}
+
+        {/* Job not found / expired — cleaned up by the 2-hour TTL */}
+        {notFound && (
+          <div className="bg-[#1a0000] border border-[#CC0000] rounded-lg p-6 mb-6 text-red-300">
+            <p className="font-semibold mb-1">Job expired or not found</p>
+            <p className="text-sm">
+              This audit job is no longer available — jobs are retained for
+              2 hours after they are created, then cleaned up automatically.
+            </p>
+            <Link href="/audit" className="text-[#CC0000] text-sm mt-3 inline-block hover:underline">
+              ← Start a new audit
+            </Link>
+          </div>
         )}
 
         {/* Error state */}
@@ -211,12 +236,12 @@ export default function ResultsPage() {
               </div>
             </motion.section>
 
-            {/* Remediation — BUG FIX: remediation can be undefined */}
-            {(result.kvs.remediation?.length ?? 0) > 0 && (
+            {/* Remediation — emitted at the top level of the report JSON */}
+            {(result.remediation?.length ?? 0) > 0 && (
               <motion.section {...fadeIn(3)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
                 <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Remediation</h2>
                 <ul className="space-y-2">
-                  {result.kvs.remediation!.map((r, i) => (
+                  {result.remediation!.map((r, i) => (
                     <li key={i} className="flex gap-2 text-sm text-gray-300">
                       <span className="text-[#CC0000] shrink-0">→</span>
                       {r}
@@ -236,7 +261,7 @@ export default function ResultsPage() {
                   ['Input shape', result.model?.input_shape?.join('×') ?? '—'],
                   ['Classes',     result.model?.num_classes ?? '—'],
                   ['Images',      result.dataset?.total_images ?? '—'],
-                  ['Duration',    result.audit_duration_seconds ? `${result.audit_duration_seconds.toFixed(1)}s` : '—'],
+                  ['Duration',    result.meta?.duration_seconds ? `${result.meta.duration_seconds.toFixed(1)}s` : '—'],
                 ].map(([k, v]) => (
                   <>
                     <dt key={`k-${k}`} className="text-gray-500">{k}</dt>

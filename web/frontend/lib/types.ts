@@ -53,6 +53,13 @@ export interface AuditStatusResponse {
 // Audit result JSON (from GET /api/audit/result/{job_id})
 // ---------------------------------------------------------------------------
 
+export interface AuditMeta {
+  kaal_version: string;
+  audit_id: string;
+  timestamp: string;
+  duration_seconds: number;
+}
+
 export interface KVSSection {
   score: number;
   label: string;
@@ -60,11 +67,11 @@ export interface KVSSection {
   dimension_scores: Record<string, number>;
   dimensions_tested: string[];
   dimensions_skipped: string[];
-  plain_english: string;
-  remediation: string[];
+  plain_english?: string;   // not emitted by the JSON report today
 }
 
 export interface AuditResult {
+  meta: AuditMeta;
   kvs: KVSSection;
   model: {
     name: string;
@@ -82,8 +89,8 @@ export interface AuditResult {
     physical_threat_rating: string;
     category_summary: Record<string, number>;
   };
-  audit_duration_seconds: number;
-  generated_at: string;
+  remediation: string[];               // top-level key, not under kvs
+  output_files?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------

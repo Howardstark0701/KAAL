@@ -3,7 +3,7 @@ import { useId, useRef, useState } from 'react';
 import UploadZone from '../components/UploadZone';
 import ProgressBar from '../components/ProgressBar';
 import { useToast } from '../components/ErrorToast';
-import { uploadModel, uploadDataset, generatePatch, connectProgressWS, patchPngUrl, patchPrintUrl, ApiError } from '../lib/api';
+import { uploadModel, uploadDataset, generatePatch, getAuditResult, connectProgressWS, patchPngUrl, patchPrintUrl, ApiError } from '../lib/api';
 import type { ModelUploadResponse, DatasetUploadResponse, PatchResult, WSMessage } from '../lib/types';
 
 export default function PatchPage() {
@@ -79,24 +79,29 @@ export default function PatchPage() {
 
       const cleanup = connectProgressWS(
         job_id,
-        (msg: WSMessage) => {
+        async (msg: WSMessage) => {
           setProgress(msg.progress_pct);
           setStepLabel(msg.step_name || msg.message);
           if (msg.type === 'error') {
             setFailed(true); setErrMsg(msg.message); setRunning(false);
           }
           if (msg.type === 'done') {
-            // fetch result from data field if present
-            const data = msg.data as Record<string, unknown> | null | undefined;
-            if (data) {
+            // The WS 'done' frame only carries {kvs_score, job_id}. The patch
+            // stats live in the job's result_data, fetched here — otherwise
+            // the results would silently fall back to 0%.
+            try {
+              const res = await getAuditResult(job_id);
+              const data = res as unknown as Record<string, unknown>;
               setPatchResult({
-                target_class:           (data.target_class as number) ?? targetClass,
-                attack_success_rate:    (data.attack_success_rate as number) ?? 0,
+                target_class:            (data.target_class as number) ?? targetClass,
+                attack_success_rate:     (data.attack_success_rate as number) ?? 0,
                 avg_confidence_on_target:(data.avg_confidence_on_target as number) ?? 0,
-                patch_fraction_used:    (data.patch_fraction_used as number) ?? patchFraction,
-                iterations_used:        (data.iterations_used as number) ?? iterations,
-                plain_english:          (data.plain_english as string) ?? '',
+                patch_fraction_used:     (data.patch_fraction_used as number) ?? patchFraction,
+                iterations_used:         (data.iterations_used as number) ?? iterations,
+                plain_english:           (data.plain_english as string) ?? '',
               });
+            } catch (e) {
+              showError(`Failed to load patch result: ${e instanceof ApiError ? e.message : e}`);
             }
             setRunning(false);
           }

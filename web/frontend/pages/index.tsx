@@ -156,7 +156,7 @@ export default function HomePage() {
       <section className="mb-8">
         <h2 className="text-xl font-semibold text-gray-200 mb-2 text-center">KVS Score</h2>
         <p className="text-center text-sm text-gray-500 mb-6">
-          KAAL Vulnerability Score — 0.0 to 10.0 across five dimensions
+          KAAL Vulnerability Score — 0.0 to 10.0 across six dimensions
         </p>
         <div className="bg-[#111] border border-[#222] rounded-lg overflow-hidden">
           <table className="w-full text-sm" role="table">

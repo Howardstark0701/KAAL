@@ -7,7 +7,7 @@ import { useToast } from '../components/ErrorToast';
 import { uploadModel, uploadDataset, startAudit, ApiError } from '../lib/api';
 import type { ModelUploadResponse, DatasetUploadResponse } from '../lib/types';
 
-const ATTACK_OPTIONS = ['fgsm', 'pgd', 'patch', 'physical'];
+const ATTACK_OPTIONS = ['fgsm', 'pgd', 'patch', 'blackbox', 'physical'];
 
 export default function AuditPage() {
   const router  = useRouter();

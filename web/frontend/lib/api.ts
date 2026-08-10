@@ -169,6 +169,7 @@ function startPollingFallback(
   const poll = async () => {
     while (!stopped) {
       await new Promise((r) => setTimeout(r, 3000));
+      if (stopped) return;
       try {
         const status = await getAuditStatus(jobId);
         const pct  = status.progress_pct;
@@ -187,7 +188,17 @@ function startPollingFallback(
         }
         onMessage({ type: 'progress', message: step, progress_pct: pct, step_name: step });
       } catch (e) {
-        onError?.(`Polling error: ${e}`);
+        // Job cleaned up by the 2-hour expiry (or never existed): the backend
+        // answers 404. Stop polling and emit the same terminal 'error' signal
+        // the WebSocket path uses — otherwise the page polls forever against
+        // a job that can never finish.
+        if (e instanceof ApiError && e.status === 404) {
+          onMessage({ type: 'error', message: 'Job expired or not found.', progress_pct: 0, step_name: '' });
+          stopped = true;
+          return;
+        }
+        // Transient failure — keep retrying, but surface it.
+        onError?.(`Polling error: ${e instanceof ApiError ? e.message : e}`);
       }
     }
   };
