@@ -8,15 +8,23 @@ Purpose: Single number summarising a model's adversarial robustness
 Dimensions and Weights (base weights sum to 0.95):
     Dim 1  — FGSM Susceptibility           20%   fgsm_success_rate × 10
     Dim 2  — PGD  Susceptibility           30%   pgd_success_rate  × 10
-    Dim 3a — Empirical Robustness          7.5%  mean ‖x_adv−x‖∞ of successful attacks / epsilon
+    Dim 3a — Empirical Robustness          7.5%  measured perturbation threshold (see below)
     Dim 3b — Adversarial Overconfidence    7.5%  mean confidence of successful adversarial examples × 10
     Dim 4  — Physical Survivability        20%   physical_survival_rate × 10
-    Dim 5  — Black-Box Efficiency          10%   query_efficiency × 10
+    Dim 5  — Black-Box Efficiency          10%   success_rate × query cheapness × 10
 
 Final score (always renormalised over tested dimensions):
     effective_weight = w_i / Σ(w_j over tested dims)
     kvs = Σ effective_weight × score_i
     kvs = round(kvs, 1), clamped to [0.0, 10.0]
+
+Dim 3a is measured by sweeping FGSM across a ladder of epsilon values and
+finding the smallest budget that misclassifies at least half the sample
+(`epsilon_robustness_curve()` in kaal.attacks.fgsm). A model broken by a
+near-invisible perturbation scores high; one that holds out to a large budget
+scores low. It must be measured this way: at a *fixed* epsilon the applied
+perturbation always saturates to exactly that epsilon by construction, so any
+ratio taken against it is a constant and says nothing about the model.
 
 Any dimension whose result is None is skipped. Because the base weights sum
 to 0.95, tested weights are always renormalised to sum to 1.0 so the headline
@@ -130,6 +138,7 @@ def calculate_kvs(
     blackbox_result=None,
     fgsm_success_rate: Optional[float] = None,
     pgd_success_rate: Optional[float] = None,
+    epsilon_curve=None,
 ) -> KVSResult:
     """Calculate the KAAL Vulnerability Score from attack results.
 
@@ -149,6 +158,9 @@ def calculate_kvs(
         fgsm_success_rate: Override the FGSM success rate (0.0–1.0) if passing
                            a pre-computed value instead of a result object.
         pgd_success_rate:  Override the PGD success rate similarly.
+        epsilon_curve:     dict from epsilon_robustness_curve() in
+                           kaal.attacks.fgsm. Drives Dim 3a. Pass None to skip
+                           that dimension — its weight is redistributed.
 
     Returns:
         KVSResult with score, label, color, per-dim scores, and remediation.
@@ -185,15 +197,11 @@ def calculate_kvs(
         dim_scores["pgd_susceptibility"] = pgd_rate * 10.0
 
     # ── Dim 3a — Empirical Robustness (weight 7.5%) ─────────────────────────
-    # Mean L∞ perturbation ‖x_adv − x_orig‖∞ over successful examples relative
-    # to the epsilon budget used. PGD is preferred when both attacks ran.
-    #   ratio = mean_linf / epsilon
-    #   score = min(ratio, 1.0) × 10
-    # Attack ran but no example succeeded → 10.0 (minimal-perturbation risk
-    # cannot be ruled out). No per-example perturbation data → skip.
-    dim_scores["empirical_robustness"] = _empirical_robustness_score(
-        pgd_result, fgsm_result
-    )
+    # Measured perturbation threshold: the smallest epsilon at which FGSM
+    # misclassifies at least half the sample, placed on a log scale between the
+    # ladder's bounds. Broken by a tiny budget → 10.0; survives the whole
+    # ladder → 0.0. No curve supplied → skip and redistribute.
+    dim_scores["empirical_robustness"] = _empirical_robustness_score(epsilon_curve)
 
     # ── Dim 3b — Adversarial Overconfidence (weight 7.5%) ───────────────────
     # Mean adversarial_confidence over successful examples across FGSM/PGD/
@@ -210,10 +218,12 @@ def calculate_kvs(
             dim_scores["physical_survivability"] = float(survival) * 10.0
 
     # ── Dim 5 — Black-Box Efficiency (weight 10%) ───────────────────────────
-    if blackbox_result is not None:
-        qe = getattr(blackbox_result, "query_efficiency", None)
-        if qe is not None:
-            dim_scores["blackbox_efficiency"] = float(qe) * 10.0
+    # Driven by whether query-only attacks actually broke the model, and how
+    # cheaply. Must not be driven by the attack's internal `query_efficiency`
+    # (the fraction of NES steps that reduced the loss): that can sit at 1.0
+    # while every attack fails, which would report maximum vulnerability for a
+    # model that resisted the attack completely.
+    dim_scores["blackbox_efficiency"] = _blackbox_efficiency_score(blackbox_result)
 
     # ── Aggregate with weight redistribution ────────────────────────────────
     tested   = [d for d, v in dim_scores.items() if v is not None]
@@ -332,54 +342,91 @@ def _extract_success_rate(
     return None
 
 
-def _example_linf(result) -> Optional[float]:
-    """L∞ perturbation ‖x_adv − x_orig‖∞ for a single result, or None.
+def _empirical_robustness_score(epsilon_curve) -> Optional[float]:
+    """Dim 3a — score the measured perturbation threshold.
 
-    FGSMResult exposes perturbation_tensor; PGDResult exposes the computed
-    mean_perturbation_linf field.
+    Takes the dict returned by epsilon_robustness_curve(). The threshold
+    (`epsilon_50`) is placed on a log scale between the ladder's first and last
+    rungs, because robustness thresholds are scale-free — the meaningful gap is
+    0.002 vs 0.016, not 0.10 vs 0.11.
+
+        broken at the smallest rung   → 10.0  (maximally fragile)
+        broken at the largest rung    →  0.0
+        never broken across the ladder →  0.0  (robust)
+
+    Returns None to skip + redistribute when no curve was measured.
     """
-    pt = getattr(result, "perturbation_tensor", None)
-    if pt is not None:
-        return float(pt.abs().amax().item())
-    mpl = getattr(result, "mean_perturbation_linf", None)
-    if mpl is not None:
-        return float(mpl)
-    return None
+    if not epsilon_curve:
+        return None
+
+    if isinstance(epsilon_curve, dict):
+        eps_50 = epsilon_curve.get("epsilon_50")
+        rungs = epsilon_curve.get("epsilons") or []
+    else:
+        eps_50 = getattr(epsilon_curve, "epsilon_50", None)
+        rungs = getattr(epsilon_curve, "epsilons", None) or []
+
+    if not rungs:
+        return None
+    if eps_50 is None:
+        return 0.0  # survived every rung tested
+
+    # The ladder may have been cut short by the early exit, so anchor the scale
+    # on the ladder's declared span rather than on whatever was evaluated.
+    from kaal.attacks.fgsm import DEFAULT_EPSILON_LADDER
+    lo = float(min(min(rungs), DEFAULT_EPSILON_LADDER[0]))
+    hi = float(max(max(rungs), DEFAULT_EPSILON_LADDER[-1]))
+    eps_50 = float(eps_50)
+
+    if hi <= lo:
+        return 10.0 if eps_50 <= lo else 0.0
+    if eps_50 <= lo:
+        return 10.0
+    if eps_50 >= hi:
+        return 0.0
+
+    import math
+    fraction = math.log(eps_50 / lo) / math.log(hi / lo)
+    return round(max(0.0, min(10.0, (1.0 - fraction) * 10.0)), 4)
 
 
-def _empirical_robustness_score(pgd_result, fgsm_result) -> Optional[float]:
-    """Dim 3a — mean ‖x_adv − x_orig‖∞ of successful examples / epsilon.
+def _blackbox_efficiency_score(blackbox_result) -> Optional[float]:
+    """Dim 5 — how vulnerable the model is to query-only attacks.
 
-    Prefers PGD when both attacks ran. Returns None to skip + redistribute
-    when neither attack carries per-example perturbation data.
+        score = success_rate x (0.5 + 0.5 x query_cheapness) x 10
+        query_cheapness = 1 - avg_queries_used / max_queries
+
+    So a model broken on every image with almost no queries scores 10.0; one
+    broken on every image only after burning the whole budget scores 5.0; one
+    that is never broken scores 0.0 regardless of how smoothly the optimiser
+    was descending when the budget ran out.
+
+    Accepts the aggregate dict from blackbox_attack_dataset() or any object
+    exposing the same fields. Returns None to skip + redistribute.
     """
-    for result in (pgd_result, fgsm_result):
-        if result is None:
-            continue
-        if isinstance(result, dict):
-            entries = result.get("results")
-            eps = result.get("epsilon_used")
-        else:
-            entries = [result]
-            eps = getattr(result, "epsilon_used", None)
-        if entries is None or eps is None:
-            continue  # success_rate-only dict → no per-example perturbation data
-        eps = float(eps)
-        n_success = 0
-        linfs: list[float] = []
-        for r in entries:
-            if not getattr(r, "success", False):
-                continue
-            n_success += 1
-            linfs.append(_example_linf(r))
-        linfs = [l for l in linfs if l is not None]
-        if n_success == 0:
-            return 10.0  # attack ran, no successes
-        if not linfs:
-            continue  # successes but no perturbation data → try next source
-        mean_linf = sum(linfs) / len(linfs)
-        return min(mean_linf / eps, 1.0) * 10.0
-    return None
+    if blackbox_result is None:
+        return None
+
+    if isinstance(blackbox_result, dict):
+        get = blackbox_result.get
+    else:
+        get = lambda k, d=None: getattr(blackbox_result, k, d)
+
+    rate = get("success_rate")
+    if rate is None:
+        return None
+    rate = max(0.0, min(1.0, float(rate)))
+    if rate == 0.0:
+        return 0.0
+
+    used = get("avg_queries_used")
+    budget = get("max_queries")
+    cheapness = 1.0
+    if used is not None and budget:
+        cheapness = 1.0 - (float(used) / float(budget))
+        cheapness = max(0.0, min(1.0, cheapness))
+
+    return round(max(0.0, min(10.0, rate * (0.5 + 0.5 * cheapness) * 10.0)), 4)
 
 
 def _adversarial_overconfidence_score(

@@ -255,9 +255,13 @@ def _run_audit(model_path: str, dataset_dir: str, attacks: list[str],
     patch_result = None
     blackbox_result = None
 
+    epsilon_curve = None
+
     if "fgsm" in attack_set:
-        from kaal.attacks.fgsm import fgsm_attack_dataset
+        from kaal.attacks.fgsm import fgsm_attack_dataset, epsilon_robustness_curve
         fgsm_agg = fgsm_attack_dataset(km, ds, epsilon=0.03)
+        # KVS Dim 3a needs the measured perturbation threshold.
+        epsilon_curve = epsilon_robustness_curve(km, ds)
 
     if "pgd" in attack_set:
         from kaal.attacks.pgd import pgd_attack_dataset
@@ -276,14 +280,10 @@ def _run_audit(model_path: str, dataset_dir: str, attacks: list[str],
     if "blackbox" in attack_set:
         from kaal.attacks.blackbox import blackbox_attack_dataset
         try:
-            bb_agg = blackbox_attack_dataset(km, ds, epsilon=0.03, max_images=50)
-            from types import SimpleNamespace
-            # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
-            # aggregate as an object rather than the raw dict.
-            blackbox_result = SimpleNamespace(
-                query_efficiency=bb_agg["avg_query_efficiency"],
-                success_rate=bb_agg["success_rate"],
-            )
+            # Pass the aggregate through as-is — both the scorer and the
+            # report readers accept the dict.
+            blackbox_result = blackbox_attack_dataset(
+                km, ds, epsilon=0.03, max_images=50)
         except Exception:
             pass
 
@@ -292,6 +292,7 @@ def _run_audit(model_path: str, dataset_dir: str, attacks: list[str],
         pgd_result=pgd_agg,
         patch_result=patch_result,
         blackbox_result=blackbox_result,
+        epsilon_curve=epsilon_curve,
     )
 
     fgsm_rate  = fgsm_agg["success_rate"]  if fgsm_agg   else None

@@ -13,6 +13,7 @@ Configuration:
 from __future__ import annotations
 
 import asyncio
+import time
 import traceback
 from contextlib import asynccontextmanager
 
@@ -25,12 +26,49 @@ from web.backend.routes.audit import router
 from web.backend.ws.progress import ws_router
 
 # ---------------------------------------------------------------------------
-# Lifespan — start the expired-job cleanup loop, cancel it on shutdown
+# Hard timeout for running jobs
+# ---------------------------------------------------------------------------
+
+# A running audit/patch job that exceeds this wall-clock cap (monotonic) is
+# marked failed by the watchdog below. Guards against NaN gradients, corrupted
+# dataset samples, or attacks stuck in an infinite loop — jobs that would
+# otherwise hang forever, block a worker slot, and never hit the 2h TTL.
+JOB_TIMEOUT_SECONDS = 3600   # 1 hour
+
+
+def _fail_timed_out_jobs() -> None:
+    """Fail running jobs whose elapsed wall-clock time exceeds the timeout.
+
+    Separated from the 30s watchdog loop so the logic can be exercised
+    directly without sleeping. Only mutates the store — the attack thread /
+    asyncio task is never cancelled; the slot is freed and the client gets a
+    terminal status. store.fail() is idempotent, so a job that completed or
+    failed between the check and the call is left untouched.
+    """
+    now = time.monotonic()
+    for job in job_store.all_jobs():
+        if (
+            job.status == "running"
+            and job.started_at is not None
+            and (now - job.started_at) > JOB_TIMEOUT_SECONDS
+        ):
+            job_store.fail(
+                job.job_id,
+                "Audit timed out after "
+                f"{JOB_TIMEOUT_SECONDS // 60} minutes. "
+                "The model or dataset may have caused the "
+                "attack to hang. Try a smaller dataset or "
+                "fewer attack steps.",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — start the cleanup + watchdog tasks, cancel them on shutdown
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the cleanup task on startup, cancel it on shutdown."""
+    """Start the cleanup + watchdog tasks on startup, cancel them on shutdown."""
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(600)    # 10 minutes
@@ -38,11 +76,18 @@ async def lifespan(app: FastAPI):
             if removed:
                 print(f"[KAAL] Cleaned up {removed} expired job(s).")
 
+    async def _watchdog():
+        while True:
+            await asyncio.sleep(30)     # check every 30 seconds
+            _fail_timed_out_jobs()
+
     cleanup_task = asyncio.create_task(_cleanup_loop())
+    watchdog_task = asyncio.create_task(_watchdog())
     try:
         yield
     finally:
         cleanup_task.cancel()
+        watchdog_task.cancel()
 
 
 # ---------------------------------------------------------------------------

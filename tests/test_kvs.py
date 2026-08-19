@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from kaal.attacks.fgsm import DEFAULT_EPSILON_LADDER
 from kaal.scoring.kvs import (
     KVSResult,
     REMEDIATION_MAP,
@@ -31,8 +32,19 @@ class _MockPhysical:
 
 
 class _MockBlackbox:
-    def __init__(self, query_efficiency: float):
-        self.query_efficiency = query_efficiency
+    """Aggregate shape returned by blackbox_attack_dataset().
+
+    Dim5 = success_rate x (0.5 + 0.5 x cheapness) x 10, and cheapness is 1.0
+    when no queries were spent — so with the default arguments the dimension
+    score is simply success_rate x 10.
+    """
+
+    def __init__(self, success_rate: float,
+                 avg_queries_used: float = 0.0,
+                 max_queries: int = 1000):
+        self.success_rate = success_rate
+        self.avg_queries_used = avg_queries_used
+        self.max_queries = max_queries
 
 
 # ---------------------------------------------------------------------------
@@ -201,31 +213,48 @@ class TestKVSFormula:
         )
         assert result.score >= 0.0
 
-    def test_empirical_robustness_score(self):
-        """Dim3a: mean ‖x_adv−x‖∞ over successes / epsilon, capped at 1.0."""
-        pgd = {
-            "success_rate": 1.0,
-            "epsilon_used": 0.1,
-            "results": [
-                type("R", (), {"success": True, "mean_perturbation_linf": 0.05})(),
-                type("R", (), {"success": True, "mean_perturbation_linf": 0.05})(),
-            ],
+    def test_empirical_robustness_broken_at_smallest_epsilon_is_max(self):
+        """Dim3a: broken by the smallest budget on the ladder → 10.0."""
+        curve = {
+            "epsilons": list(DEFAULT_EPSILON_LADDER),
+            "success_rates": [1.0],
+            "epsilon_50": DEFAULT_EPSILON_LADDER[0],
         }
-        result = calculate_kvs(pgd_result=pgd)
-        assert result.dimension_scores["empirical_robustness"] == pytest.approx(5.0)
-
-    def test_empirical_robustness_no_successes_is_max(self):
-        """Dim3a: attack ran but zero successes → 10.0."""
-        pgd = {
-            "success_rate": 0.0,
-            "epsilon_used": 0.1,
-            "results": [type("R", (), {"success": False, "mean_perturbation_linf": 0.0})()],
-        }
-        result = calculate_kvs(pgd_result=pgd)
+        result = calculate_kvs(epsilon_curve=curve)
         assert result.dimension_scores["empirical_robustness"] == pytest.approx(10.0)
 
-    def test_empirical_robustness_skipped_without_data(self):
-        """Dim3a: success_rate-only dicts carry no per-example data → skipped."""
+    def test_empirical_robustness_never_broken_is_zero(self):
+        """Dim3a: survived every rung → 0.0. A robust model must not score max."""
+        curve = {
+            "epsilons": list(DEFAULT_EPSILON_LADDER),
+            "success_rates": [0.0] * len(DEFAULT_EPSILON_LADDER),
+            "epsilon_50": None,
+        }
+        result = calculate_kvs(epsilon_curve=curve)
+        assert result.dimension_scores["empirical_robustness"] == pytest.approx(0.0)
+
+    def test_empirical_robustness_is_monotonic_in_threshold(self):
+        """Dim3a must decrease as the breaking epsilon rises — the whole point.
+
+        The pre-fix implementation returned 10.0 for every input, so this is the
+        regression guard: a dimension that cannot vary carries no information.
+        """
+        scores = []
+        for eps_50 in DEFAULT_EPSILON_LADDER:
+            curve = {
+                "epsilons": list(DEFAULT_EPSILON_LADDER),
+                "success_rates": [1.0],
+                "epsilon_50": eps_50,
+            }
+            scores.append(
+                calculate_kvs(epsilon_curve=curve)
+                .dimension_scores["empirical_robustness"]
+            )
+        assert scores == sorted(scores, reverse=True), scores
+        assert scores[0] > scores[-1], "Dim3a is constant — the F1 bug is back"
+
+    def test_empirical_robustness_skipped_without_curve(self):
+        """Dim3a: no curve measured → skipped and its weight redistributed."""
         result = calculate_kvs(fgsm_success_rate=0.5, pgd_success_rate=0.5)
         assert "empirical_robustness" in result.dimensions_skipped
 
@@ -342,3 +371,49 @@ class TestInputFormats:
     def test_physical_none_skipped(self):
         result = calculate_kvs(fgsm_success_rate=0.5, physical_result=None)
         assert "physical_survivability" in result.dimensions_skipped
+
+
+class TestBlackboxEfficiencyDimension:
+    """F9: Dim5 must reflect whether query-only attacks broke the model.
+
+    It previously read the attack's internal `query_efficiency` — the fraction
+    of NES steps that reduced the loss — which sits near 1.0 on a smoothly
+    descending run that never actually flips a single label. That reported
+    maximum vulnerability for a model that resisted the attack completely.
+    """
+
+    def test_no_successes_scores_zero(self):
+        agg = {
+            "success_rate": 0.0,
+            "avg_queries_used": 166.0,
+            "avg_query_efficiency": 1.0,   # optimiser was descending happily
+            "max_queries": 200,
+            "successful_attacks": 0,
+            "total_images": 10,
+        }
+        result = calculate_kvs(blackbox_result=agg)
+        assert result.dimension_scores["blackbox_efficiency"] == pytest.approx(0.0)
+
+    def test_cheap_total_break_scores_max(self):
+        agg = {"success_rate": 1.0, "avg_queries_used": 0.0, "max_queries": 1000}
+        result = calculate_kvs(blackbox_result=agg)
+        assert result.dimension_scores["blackbox_efficiency"] == pytest.approx(10.0)
+
+    def test_expensive_total_break_scores_half(self):
+        agg = {"success_rate": 1.0, "avg_queries_used": 1000.0, "max_queries": 1000}
+        result = calculate_kvs(blackbox_result=agg)
+        assert result.dimension_scores["blackbox_efficiency"] == pytest.approx(5.0)
+
+    def test_monotonic_in_success_rate(self):
+        scores = [
+            calculate_kvs(blackbox_result={
+                "success_rate": r, "avg_queries_used": 500.0, "max_queries": 1000,
+            }).dimension_scores["blackbox_efficiency"]
+            for r in (0.0, 0.25, 0.5, 0.75, 1.0)
+        ]
+        assert scores == sorted(scores), scores
+        assert scores[0] < scores[-1]
+
+    def test_skipped_when_absent(self):
+        result = calculate_kvs(fgsm_success_rate=0.5)
+        assert "blackbox_efficiency" in result.dimensions_skipped

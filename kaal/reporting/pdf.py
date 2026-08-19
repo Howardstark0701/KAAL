@@ -36,6 +36,7 @@ def generate_pdf_report(
     fgsm_result=None,
     pgd_result=None,
     patch_result=None,
+    blackbox_result=None,
     physical_result=None,
     gradcam_comparison=None,
     collapse_curve_path: Optional[str] = None,
@@ -53,6 +54,9 @@ def generate_pdf_report(
         fgsm_result:            FGSMResult or aggregate dict.
         pgd_result:             PGDResult or aggregate dict.
         patch_result:           PatchResult from generate_patch().
+        blackbox_result:        BlackBoxResult, or the dataset aggregate from
+                                blackbox_attack_dataset(). Appears as a row in
+                                the summary table.
         physical_result:        PhysicalRobustnessResult.
         gradcam_comparison:     GradCAMComparisonResult (optional).
         collapse_curve_path:    Path to PGD collapse curve PNG (optional).
@@ -88,6 +92,7 @@ def generate_pdf_report(
         fgsm_result=fgsm_result,
         pgd_result=pgd_result,
         patch_result=patch_result,
+        blackbox_result=blackbox_result,
         physical_result=physical_result,
         gradcam_comparison=gradcam_comparison,
         collapse_curve_path=collapse_curve_path,
@@ -773,6 +778,7 @@ def _get_attack_params(ctx) -> list:
         ("FGSM",     ctx.fgsm_result),
         ("PGD",      ctx.pgd_result),
         ("Patch",    ctx.patch_result),
+        ("Black-Box", getattr(ctx, "blackbox_result", None)),
     ]:
         if result is None:
             continue

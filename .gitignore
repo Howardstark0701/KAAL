@@ -88,3 +88,9 @@ Thumbs.db
 # Assets (large binary files tracked separately)
 assets/demo.gif
 assets/screenshots/*.png
+
+# Agent driver screenshots (.claude/skills/run-kaal-web/driver.mjs)
+.kaal-driver-shots/
+
+# TypeScript incremental build cache
+web/frontend/tsconfig.tsbuildinfo
