@@ -94,3 +94,7 @@ assets/screenshots/*.png
 
 # TypeScript incremental build cache
 web/frontend/tsconfig.tsbuildinfo
+
+# Generated audit/certification output
+kaal_cert_test/
+fgsm_test_output_comparison.png
