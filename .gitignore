@@ -98,3 +98,8 @@ web/frontend/tsconfig.tsbuildinfo
 # Generated audit/certification output
 kaal_cert_test/
 fgsm_test_output_comparison.png
+
+# Personal notes about model selection, not KAAL documentation. Commit
+# 52e05b9 left this untracked deliberately; ignoring it stops it showing up
+# as an untracked file on every status check.
+MODEL_ROUTING.md
