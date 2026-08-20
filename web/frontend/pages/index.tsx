@@ -41,6 +41,21 @@ const IconPhysical = () => (
   </svg>
 );
 
+// Sealed box with query arrows going in and out — no view of the inside.
+const IconBlackbox = () => (
+  <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+    <rect x="10" y="10" width="12" height="12" rx="1.5"
+          stroke="#CC0000" strokeWidth="1.5" fill="#CC0000" fillOpacity="0.18"/>
+    <path d="M2 13 H8" stroke="#CC0000" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M6 11 L8 13 L6 15" stroke="#CC0000" strokeWidth="1.5"
+          strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M24 19 H30" stroke="#CC0000" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M28 17 L30 19 L28 21" stroke="#CC0000" strokeWidth="1.5"
+          strokeLinecap="round" strokeLinejoin="round"/>
+    <circle cx="16" cy="16" r="1.5" fill="#CC0000" fillOpacity="0.6"/>
+  </svg>
+);
+
 // ---------------------------------------------------------------------------
 // Data
 // ---------------------------------------------------------------------------
@@ -68,6 +83,12 @@ const ATTACKS = [
     sub:  'Robustness Simulator',
     desc: 'Tests whether adversarial examples survive 26 real-world transforms: JPEG, blur, rotation, lighting, noise.',
     Icon: IconPhysical,
+  },
+  {
+    name: 'Black-Box',
+    sub:  'NES Gradient Estimation',
+    desc: 'Attacks with no access to gradients — only the model’s output. Estimates the gradient from queries alone, within a fixed budget.',
+    Icon: IconBlackbox,
   },
 ];
 
@@ -128,7 +149,8 @@ export default function HomePage() {
 
         {/* Social proof */}
         <p className="text-xs text-gray-600">
-          Supports PyTorch · TensorFlow · HuggingFace · sklearn · XGBoost · ONNX
+          Loads .pt · .pth · .h5 · .keras · .onnx · .tflite —
+          PyTorch, TensorFlow/Keras, ONNX and TFLite
         </p>
       </section>
 

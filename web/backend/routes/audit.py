@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shutil
 import tempfile
 import traceback
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from web.backend.jobs.store import job_store
@@ -50,6 +51,32 @@ def _job_error_message(exc: Exception) -> str:
     """
     message = " ".join(str(exc).strip().split()) or exc.__class__.__name__
     return message[:300]
+
+
+# ---------------------------------------------------------------------------
+# Job ID validation
+# ---------------------------------------------------------------------------
+
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+
+def _validate_job_id(job_id: str) -> None:
+    """Reject malformed job IDs before any store lookup.
+
+    Job IDs are secrets.token_urlsafe(32): 43 URL-safe base64 characters.
+    This turns enumeration attempts (traversal, sequential/short ids, etc.)
+    into an immediate 400 without touching the job store.
+    """
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid job ID format.",
+        )
+
+
+# Per-IP cap on concurrent background jobs (audit + patch). Prevents a single
+# client from spawning unbounded CPU/GPU-consuming jobs in a tight loop.
+MAX_CONCURRENT_JOBS_PER_IP = 2
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +142,19 @@ async def upload_model(file: UploadFile = File(...)):
     try:
         from kaal.engine.loader import load_model
         kaal_model = load_model(str(save_path))
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to load model: {e}")
+    except Exception as exc:
+        # The loader's message embeds the absolute save path, which would
+        # disclose the server's username and temp-directory layout. Log it
+        # server-side; return only the exception class and the client's own
+        # filename, both of which the client already knows.
+        traceback.print_exc()
+        print(f"[KAAL] Model load failed for '{safe_name}': {exc}")
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Could not load '{safe_name}' as a model "
+                    f"({type(exc).__name__}). Check that the file is a "
+                    f"complete, uncorrupted model in a supported format."),
+        )
 
     model_id = job_store.register_file(str(save_path))
 
@@ -173,8 +211,31 @@ async def upload_dataset(files: list[UploadFile] = File(...)):
 # ---------------------------------------------------------------------------
 
 @router.post("/api/audit/start", response_model=AuditStartResponse)
-async def start_audit(req: AuditStartRequest, background_tasks: BackgroundTasks):
+async def start_audit(req: AuditStartRequest, request: Request,
+                      background_tasks: BackgroundTasks):
     """Start a full audit as a background task. Returns job_id immediately."""
+    # Validate attack names in the request, not in the background task. A job
+    # that can never succeed must not be created, must not occupy a rate-limit
+    # slot, and must not be reported to the client as "started".
+    try:
+        _validate_attacks(req.attacks)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Enforce the per-IP concurrent-job cap before any file I/O or job creation.
+    client_ip = request.client.host if request.client else ""
+    active = job_store.count_active_jobs_for_ip(client_ip)
+    if active >= MAX_CONCURRENT_JOBS_PER_IP:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many active audits. You already have {active} "
+                f"audit(s) running. Wait for one to complete before "
+                f"starting another (max {MAX_CONCURRENT_JOBS_PER_IP} "
+                f"concurrent audits per client)."
+            ),
+        )
+
     model_path = job_store.get_file_path(req.model_id)
     if not model_path:
         raise HTTPException(status_code=404, detail=f"model_id '{req.model_id}' not found.")
@@ -184,7 +245,8 @@ async def start_audit(req: AuditStartRequest, background_tasks: BackgroundTasks)
         raise HTTPException(status_code=404, detail=f"dataset_id '{req.dataset_id}' not found.")
 
     job_id = job_store.create("audit")
-    job_store.update(job_id, model_id=req.model_id, dataset_id=req.dataset_id)
+    job_store.update(job_id, model_id=req.model_id, dataset_id=req.dataset_id,
+                     client_ip=client_ip)
 
     background_tasks.add_task(
         _run_audit_pipeline,
@@ -207,6 +269,7 @@ async def start_audit(req: AuditStartRequest, background_tasks: BackgroundTasks)
 
 @router.get("/api/audit/status/{job_id}", response_model=AuditStatusResponse)
 async def get_audit_status(job_id: str):
+    _validate_job_id(job_id)
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
@@ -222,6 +285,7 @@ async def get_audit_status(job_id: str):
         current_step=job.current_step,
         kvs_score=kvs_score,
         error=job.error,
+        timed_out=bool(job.error and job.error.startswith("Audit timed out")),
     )
 
 
@@ -231,6 +295,7 @@ async def get_audit_status(job_id: str):
 
 @router.get("/api/audit/result/{job_id}")
 async def get_audit_result(job_id: str):
+    _validate_job_id(job_id)
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
@@ -248,6 +313,7 @@ async def get_audit_result(job_id: str):
 
 @router.get("/api/report/{job_id}/pdf")
 async def download_pdf(job_id: str):
+    _validate_job_id(job_id)
     job = job_store.get(job_id)
     if not job or job.status != "complete":
         raise HTTPException(status_code=404, detail="Report not available.")
@@ -266,6 +332,7 @@ async def download_pdf(job_id: str):
 
 @router.get("/api/patch/{job_id}/png")
 async def download_patch_png(job_id: str):
+    _validate_job_id(job_id)
     job = job_store.get(job_id)
     if not job or not job.patch_png_path or not os.path.exists(job.patch_png_path):
         raise HTTPException(status_code=404, detail="Patch PNG not found.")
@@ -279,6 +346,7 @@ async def download_patch_png(job_id: str):
 
 @router.get("/api/patch/{job_id}/printable")
 async def download_patch_printable(job_id: str):
+    _validate_job_id(job_id)
     job = job_store.get(job_id)
     if not job or not job.patch_pdf_path or not os.path.exists(job.patch_pdf_path):
         raise HTTPException(status_code=404, detail="Printable patch PDF not found.")
@@ -292,7 +360,22 @@ async def download_patch_printable(job_id: str):
 
 @router.post("/api/patch/generate", response_model=PatchGenerateResponse)
 async def generate_patch_endpoint(req: PatchGenerateRequest,
-                                   background_tasks: BackgroundTasks):
+                                  request: Request,
+                                  background_tasks: BackgroundTasks):
+    # Enforce the per-IP concurrent-job cap before any file I/O or job creation.
+    client_ip = request.client.host if request.client else ""
+    active = job_store.count_active_jobs_for_ip(client_ip)
+    if active >= MAX_CONCURRENT_JOBS_PER_IP:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many active audits. You already have {active} "
+                f"audit(s) running. Wait for one to complete before "
+                f"starting another (max {MAX_CONCURRENT_JOBS_PER_IP} "
+                f"concurrent audits per client)."
+            ),
+        )
+
     model_path = job_store.get_file_path(req.model_id)
     if not model_path:
         raise HTTPException(status_code=404, detail="model_id not found.")
@@ -301,6 +384,7 @@ async def generate_patch_endpoint(req: PatchGenerateRequest,
         raise HTTPException(status_code=404, detail="dataset_id not found.")
 
     job_id = job_store.create("patch")
+    job_store.update(job_id, client_ip=client_ip)
     background_tasks.add_task(
         _run_patch_pipeline,
         job_id=job_id,
@@ -352,6 +436,23 @@ async def compare_audits(
 # Background task: full audit pipeline
 # ---------------------------------------------------------------------------
 
+def get_model_vram_mb(model) -> int:
+    """Rough VRAM estimate for a loaded model, in MB.
+
+    Torch models: summed parameter bytes + ~50% for activations. Non-torch
+    models (Keras/ONNX/TFLite) have no .parameters() and never sit on a CUDA
+    device in the web pipeline — return 0. Accepts the KaalModel wrapper or
+    the raw framework object.
+    """
+    raw = getattr(model, "model", model)
+    if not hasattr(raw, "parameters"):
+        return 0
+    # Sum parameter sizes
+    param_mb = sum(p.numel() * 4 for p in raw.parameters()) // (1024 ** 2)
+    # Add ~50% for activations (rough estimate)
+    return int(param_mb * 1.5)
+
+
 def _run_audit_pipeline(
     job_id: str,
     model_path: str,
@@ -367,7 +468,8 @@ def _run_audit_pipeline(
     start_time = time.time()
 
     try:
-        job_store.update(job_id, status="running", progress_pct=5,
+        job_store.mark_running(job_id)
+        job_store.update(job_id, progress_pct=5,
                          current_step="Loading model and dataset")
 
         from kaal.engine.loader import load_model
@@ -376,11 +478,36 @@ def _run_audit_pipeline(
         kaal_model   = load_model(model_path)
         kaal_dataset = load_dataset(dataset_path, input_shape=kaal_model.input_shape)
 
+        # ── Pre-audit GPU/VRAM guard — catch obvious OOMs before any attack ──
+        from kaal.engine.utils import validate_gpu_for_dataset
+
+        # Resolve the device this audit actually runs on. The loader pins
+        # models to CPU today (map_location='cpu', ONNX CPUExecutionProvider),
+        # so this is "cpu" unless a future GPU load path moves the model to
+        # cuda. The guard is wired and correct; it becomes active when a GPU
+        # execution path exists.
+        device = "cpu"
+        try:
+            raw = getattr(kaal_model, "model", kaal_model)
+            device = str(next(raw.parameters()).device.type)
+        except (AttributeError, StopIteration, RuntimeError):
+            pass
+
+        safe, gpu_msg = validate_gpu_for_dataset(
+            device=device,
+            dataset_size=len(kaal_dataset),
+            model_vram_estimate_mb=get_model_vram_mb(kaal_model),
+        )
+        if not safe:
+            job_store.fail(job_id, gpu_msg)
+            return
+
         output_dir = _OUTPUT_DIR / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         fgsm_agg = pgd_agg = patch_result = phys_result = None
         blackbox_result = None
+        epsilon_curve = None
         adv_tensors: list = []
         orig_classes: list = []
         _validate_attacks(attacks)
@@ -393,8 +520,12 @@ def _run_audit_pipeline(
         if "fgsm" in attack_list:
             job_store.update(job_id, progress_pct=current_pct,
                              current_step="Running FGSM attack")
-            from kaal.attacks.fgsm import fgsm_attack_dataset
+            from kaal.attacks.fgsm import (fgsm_attack_dataset,
+                                           epsilon_robustness_curve)
             fgsm_agg = fgsm_attack_dataset(kaal_model, kaal_dataset, epsilon=epsilon)
+            # KVS Dim 3a needs the measured perturbation threshold, which a
+            # single fixed-epsilon run cannot provide.
+            epsilon_curve = epsilon_robustness_curve(kaal_model, kaal_dataset)
             for r in fgsm_agg["results"]:
                 adv_tensors.append(r.adversarial_tensor)
                 orig_classes.append(r.original_class)
@@ -452,13 +583,9 @@ def _run_audit_pipeline(
                     kaal_model, kaal_dataset,
                     epsilon=epsilon,
                 )
-                from types import SimpleNamespace
-                # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
-                # aggregate as an object rather than the raw dict.
-                blackbox_result = SimpleNamespace(
-                    query_efficiency=bb_agg["avg_query_efficiency"],
-                    success_rate=bb_agg["success_rate"],
-                )
+                # Pass the aggregate through as-is — both the scorer and the
+                # report readers accept the dict.
+                blackbox_result = bb_agg
             except Exception as exc:
                 # Black-box is best-effort; skip without failing the whole job
                 # (FGSM/PGD may have already succeeded).
@@ -486,6 +613,7 @@ def _run_audit_pipeline(
             patch_result=patch_result,
             physical_result=phys_result,
             blackbox_result=blackbox_result,
+            epsilon_curve=epsilon_curve,
         )
 
         try:
@@ -523,7 +651,9 @@ def _run_audit_pipeline(
                 fgsm_result=fgsm_agg,
                 pgd_result=pgd_agg,
                 patch_result=patch_result,
+                blackbox_result=blackbox_result,
                 physical_result=phys_result,
+                epsilon_curve=epsilon_curve,
                 audit_duration_seconds=duration,
             )
 
@@ -537,6 +667,7 @@ def _run_audit_pipeline(
                 fgsm_result=fgsm_agg["results"][0] if fgsm_agg and fgsm_agg["results"] else None,
                 pgd_result=pgd_agg["results"][0] if pgd_agg and pgd_agg["results"] else None,
                 patch_result=patch_result,
+                blackbox_result=blackbox_result,
                 physical_result=phys_result,
                 collapse_curve_path=collapse_path,
                 fingerprint_path=fingerprint_path,
@@ -586,7 +717,8 @@ def _run_patch_pipeline(
     print_cm: float,
 ):
     try:
-        job_store.update(job_id, status="running", progress_pct=5,
+        job_store.mark_running(job_id)
+        job_store.update(job_id, progress_pct=5,
                          current_step="Loading model and dataset")
 
         from kaal.engine.loader import load_model

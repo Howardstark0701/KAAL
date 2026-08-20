@@ -54,6 +54,7 @@ class AuditStatusResponse(BaseModel):
     current_step: str
     kvs_score: Optional[float] = None
     error: Optional[str] = None
+    timed_out: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -196,6 +196,7 @@ def audit(
     patch_result  = None
     phys_result   = None
     blackbox_result = None
+    epsilon_curve = None
     gradcam_cmp   = None
     collapse_path = None
     adv_tensors   = []
@@ -210,12 +211,15 @@ def audit(
         _print_step(quiet, step_num, total_steps, "Running FGSM attack...",
                     f"ε = {epsilon} | {len(kaal_dataset)} images")
 
-        from kaal.attacks.fgsm import fgsm_attack_dataset
+        from kaal.attacks.fgsm import fgsm_attack_dataset, epsilon_robustness_curve
         fgsm_agg = _run_with_progress(
             quiet,
             lambda: fgsm_attack_dataset(kaal_model, kaal_dataset, epsilon=epsilon),
             len(kaal_dataset),
         )
+        # KVS Dim 3a needs the measured perturbation threshold, which a
+        # single fixed-epsilon run cannot provide.
+        epsilon_curve = epsilon_robustness_curve(kaal_model, kaal_dataset)
         for r in fgsm_agg["results"]:
             adv_tensors.append(r.adversarial_tensor)
             orig_classes.append(r.original_class)
@@ -310,7 +314,6 @@ def audit(
                     f"ε = {epsilon} | {n_queries} max queries/image | {mode}")
 
         from kaal.attacks.blackbox import blackbox_attack_dataset
-        from types import SimpleNamespace
         bb_agg = _run_with_progress(
             quiet,
             lambda: blackbox_attack_dataset(
@@ -322,15 +325,10 @@ def audit(
             ),
             len(kaal_dataset),
         )
-        # KVS Dim 5 reads `.query_efficiency`, so expose the dataset aggregate
-        # as an object rather than the raw dict.
-        blackbox_result = SimpleNamespace(
-            query_efficiency=bb_agg["avg_query_efficiency"],
-            success_rate=bb_agg["success_rate"],
-            avg_queries_used=bb_agg["avg_queries_used"],
-            total_images=bb_agg["total_images"],
-            successful_attacks=bb_agg["successful_attacks"],
-        )
+        # Pass the aggregate through as-is. Both the scorer and the report
+        # readers accept the dict; re-wrapping it in a partial object is what
+        # previously dropped fields on the floor.
+        blackbox_result = bb_agg
         if not quiet:
             console.print(
                 f"      [green]Success rate: {bb_agg['success_rate']:.0%}[/green]  |  "
@@ -375,6 +373,7 @@ def audit(
         patch_result=patch_result,
         physical_result=phys_result,
         blackbox_result=blackbox_result,
+        epsilon_curve=epsilon_curve,
     )
 
     # Fingerprint
@@ -417,7 +416,9 @@ def audit(
             fgsm_result=fgsm_agg,
             pgd_result=pgd_agg,
             patch_result=patch_result,
+            blackbox_result=blackbox_result,
             physical_result=phys_result,
+            epsilon_curve=epsilon_curve,
             audit_duration_seconds=duration,
         )
 
@@ -432,6 +433,7 @@ def audit(
             fgsm_result=fgsm_agg["results"][0] if fgsm_agg and fgsm_agg["results"] else None,
             pgd_result=pgd_agg["results"][0] if pgd_agg and pgd_agg["results"] else None,
             patch_result=patch_result,
+            blackbox_result=blackbox_result,
             physical_result=phys_result,
             gradcam_comparison=gradcam_cmp,
             collapse_curve_path=collapse_path,

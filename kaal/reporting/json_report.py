@@ -37,6 +37,7 @@ def generate_json_report(
     patch_result=None,
     blackbox_result=None,
     physical_result=None,
+    epsilon_curve=None,
     audit_duration_seconds: float = 0.0,
     kaal_version: str = "1.0.0",
     audit_id: Optional[str] = None,
@@ -52,7 +53,10 @@ def generate_json_report(
         fgsm_result:             FGSMResult or aggregate dict from fgsm_attack_dataset().
         pgd_result:              PGDResult or aggregate dict from pgd_attack_dataset().
         patch_result:            PatchResult from generate_patch().
-        blackbox_result:         BlackBoxResult (stub — pass None).
+        blackbox_result:         BlackBoxResult, or the dataset aggregate from
+                                 blackbox_attack_dataset().
+        epsilon_curve:           dict from epsilon_robustness_curve(). Recorded
+                                 as the evidence behind KVS Dim 3a.
         physical_result:         PhysicalRobustnessResult.
         audit_duration_seconds:  How long the audit took.
         kaal_version:            KAAL version string.
@@ -78,6 +82,7 @@ def generate_json_report(
         "attacks": _build_attacks_section(
             fgsm_result, pgd_result, patch_result, blackbox_result
         ),
+        "epsilon_robustness": _build_epsilon_curve_section(epsilon_curve),
         "physical_robustness": _build_physical_section(physical_result),
         "output_files": _build_output_files_section(output_dir, patch_result),
         "remediation": _build_remediation_section(kvs_result),
@@ -93,6 +98,29 @@ def generate_json_report(
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
+
+def _build_epsilon_curve_section(curve) -> dict:
+    """Measured perturbation threshold — the evidence behind KVS Dim 3a.
+
+    Empty dict when no curve was measured, so the key is always present and a
+    consumer can distinguish "not measured" from "measured, model never broke"
+    (which reports epsilon_50: null with a populated curve).
+    """
+    if not curve:
+        return {}
+    get = curve.get if isinstance(curve, dict) else \
+        (lambda k, d=None: getattr(curve, k, d))
+    # Epsilons keep 6 decimals: the ladder is n/255, so 4 would collapse
+    # 0.5/255 (0.001961) and 1/255 (0.003922) toward each other on display.
+    return {
+        "epsilons":       [round(float(e), 6) for e in (get("epsilons") or [])],
+        "success_rates":  [_r4(r) for r in (get("success_rates") or [])],
+        "epsilon_50":     (round(float(get("epsilon_50")), 6)
+                           if get("epsilon_50") is not None else None),
+        "target_rate":    _r4(get("target_rate", 0.5) or 0.5),
+        "images_sampled": int(get("images_sampled", 0) or 0),
+    }
+
 
 def _build_meta(
     version: str,
@@ -201,14 +229,40 @@ def _build_attacks_section(fgsm, pgd, patch, blackbox) -> dict:
         }
 
     # Black-box
+    #
+    # Two shapes reach here. Every audit pipeline passes the dataset-level
+    # aggregate from blackbox_attack_dataset(), which reports averages and has
+    # no single .success / .queries_used. A bare BlackBoxResult from a
+    # single-image call has those instead. Read whichever is present rather
+    # than defaulting the aggregate's fields to zero.
     if blackbox is not None:
-        out["blackbox"] = {
-            "max_queries":          int(getattr(blackbox, "max_queries", 0)),
-            "success_rate":         _r4(1.0 if getattr(blackbox, "success", False) else 0.0),
-            "queries_used":         int(getattr(blackbox, "queries_used", 0)),
-            "query_efficiency":     _r4(getattr(blackbox, "query_efficiency", 0.0)),
-            "plain_english":        str(getattr(blackbox, "plain_english", "")),
-        }
+        if isinstance(blackbox, dict):
+            get = blackbox.get
+        else:
+            get = lambda k, d=None: getattr(blackbox, k, d)
+
+        is_aggregate = get("avg_query_efficiency") is not None or \
+                       get("avg_queries_used") is not None
+
+        if is_aggregate:
+            out["blackbox"] = {
+                "max_queries":      int(get("max_queries", 0) or 0),
+                "success_rate":     _r4(get("success_rate", 0.0) or 0.0),
+                "avg_queries_used": _r4(get("avg_queries_used", 0.0) or 0.0),
+                "query_efficiency": _r4(get("avg_query_efficiency")
+                                        or get("query_efficiency") or 0.0),
+                "total_images":     int(get("total_images", 0) or 0),
+                "successful_attacks": int(get("successful_attacks", 0) or 0),
+                "plain_english":    str(get("plain_english", "") or ""),
+            }
+        else:
+            out["blackbox"] = {
+                "max_queries":      int(get("max_queries", 0) or 0),
+                "success_rate":     _r4(1.0 if get("success", False) else 0.0),
+                "queries_used":     int(get("queries_used", 0) or 0),
+                "query_efficiency": _r4(get("query_efficiency", 0.0) or 0.0),
+                "plain_english":    str(get("plain_english", "") or ""),
+            }
 
     return out
 

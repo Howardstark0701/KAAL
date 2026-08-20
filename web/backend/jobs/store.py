@@ -1,14 +1,16 @@
 """In-memory job state store — Spec 16.1 — Phase 10, Kiro Prompt 10.2.
 
-Dict mapping job_id (uuid4) → JobState.
+Dict mapping job_id (cryptographically random token) → JobState.
 No database, no file persistence — in-memory only.
 Jobs expire after 2 hours via a background cleanup task.
 """
 
 from __future__ import annotations
 
+import secrets
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,7 +27,7 @@ class JobState:
     """Holds all state for a single audit or patch job."""
 
     job_id: str
-    """UUID4 string."""
+    """secrets.token_urlsafe(32) — 43-char URL-safe token, unguessable."""
 
     job_type: str
     """'audit' | 'patch'"""
@@ -38,6 +40,10 @@ class JobState:
 
     current_step: str
     """Human-readable description of the current pipeline step."""
+
+    # ── Rate-limit metadata ───────────────────────────────────────────────────
+    client_ip: str = ""
+    """Client IP that created this job — used by the per-IP concurrent-job cap."""
 
     # ── Result paths ──────────────────────────────────────────────────────────
     result_json_path: Optional[str] = None
@@ -61,6 +67,10 @@ class JobState:
     # ── Timestamps ────────────────────────────────────────────────────────────
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
+    started_at: Optional[float] = None
+    """time.monotonic() when the job transitioned to 'running' — the wall-clock
+    start for the watchdog's hard timeout. A float (monotonic clock), unlike
+    the wall-clock datetime fields above. None until mark_running() is called."""
 
     # ── Cached file IDs (for file retrieval) ──────────────────────────────────
     model_id: Optional[str] = None
@@ -110,7 +120,7 @@ class JobStore:
 
     def create(self, job_type: str = "audit") -> str:
         """Create a new job, return its job_id."""
-        job_id = str(uuid.uuid4())
+        job_id = secrets.token_urlsafe(32)
         self._jobs[job_id] = JobState(
             job_id=job_id,
             job_type=job_type,
@@ -119,6 +129,19 @@ class JobStore:
             current_step="Queued",
         )
         return job_id
+
+    def mark_running(self, job_id: str) -> None:
+        """Transition a job to 'running' and record its monotonic start time.
+
+        Called once at the top of each pipeline. The watchdog uses started_at
+        to enforce the hard wall-clock timeout. Thread-safe: guarded by lock.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "running"
+            job.started_at = time.monotonic()
 
     def get(self, job_id: str) -> Optional[JobState]:
         """Return JobState or None if not found."""
@@ -157,17 +180,39 @@ class JobStore:
         )
 
     def fail(self, job_id: str, error: str):
-        """Mark a job as failed with an error message."""
-        self.update(
-            job_id,
-            status="failed",
-            current_step="Failed",
-            error=error,
-            completed_at=datetime.now(timezone.utc),
-        )
+        """Mark a job as failed with an error message.
+
+        Idempotent: jobs already 'complete' or 'failed' are left untouched.
+        The watchdog and the pipeline can race toward a terminal state, and a
+        completed job must never be flipped back to failed by a late timeout.
+        Atomic with the terminal-state check — guarded by self._lock.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            if job.status in ("complete", "failed"):
+                return
+            job.status = "failed"
+            job.current_step = "Failed"
+            job.error = error
+            job.completed_at = datetime.now(timezone.utc)
 
     def all_jobs(self) -> list[JobState]:
         return list(self._jobs.values())
+
+    def count_active_jobs_for_ip(self, client_ip: str) -> int:
+        """Count jobs created by one client IP that are still pending/running.
+
+        Used by the audit and patch endpoints to enforce a per-IP cap on
+        concurrent background jobs. Thread-safe: reads _jobs under lock.
+        """
+        with self._lock:
+            return sum(
+                1 for job in self._jobs.values()
+                if job.client_ip == client_ip
+                and job.status in ("pending", "running")
+            )
 
     # ── File registry ─────────────────────────────────────────────────────────
 

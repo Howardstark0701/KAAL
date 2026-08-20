@@ -203,7 +203,10 @@ export default function ResultsPage() {
             {/* Radar chart */}
             <motion.section {...fadeIn(1)} className="bg-[#111] border border-[#222] rounded-lg p-6 mb-6">
               <h2 className="text-xs text-gray-500 uppercase tracking-wider mb-4">Vulnerability Fingerprint</h2>
-              <KaalRadarChart scores={result.kvs.dimension_scores} />
+              <KaalRadarChart
+                scores={result.kvs.dimension_scores}
+                skipped={result.kvs.dimensions_skipped ?? []}
+              />
             </motion.section>
 
             {/* Dimension scores */}

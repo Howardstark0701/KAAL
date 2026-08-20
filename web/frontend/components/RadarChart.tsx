@@ -5,6 +5,7 @@ import {
   RadarChart,
   PolarGrid,
   PolarAngleAxis,
+  PolarRadiusAxis,
   ResponsiveContainer,
   Legend,
 } from 'recharts';
@@ -17,13 +18,32 @@ interface RadarChartProps {
   scoresB?: Record<string, number>;
   labelA?: string;
   labelB?: string;
+  /** Dimensions that were not tested — rendered as gaps, not zeros */
+  skipped?: string[];
+  skippedB?: string[];
 }
 
-export default function KaalRadarChart({ scores, scoresB, labelA = 'Model', labelB = 'After' }: RadarChartProps) {
+export default function KaalRadarChart({
+  scores, scoresB, labelA = 'Model', labelB = 'After', skipped, skippedB,
+}: RadarChartProps) {
+  // An untested dimension must not plot at 0. On a vulnerability scale 0 reads
+  // as "perfectly robust", which is the opposite of "we have no evidence".
+  // null makes recharts break the polygon at that axis instead.
+  const valueFor = (
+    src: Record<string, number> | undefined,
+    key: string,
+    skips: string[] | undefined,
+  ): number | null => {
+    if (!src) return null;
+    if (skips?.includes(key)) return null;
+    const v = src[key];
+    return typeof v === 'number' ? v : null;
+  };
+
   const data = DIM_ORDER.map((key) => ({
     dim: DIM_LABELS[key] ?? key,
-    A: scores[key] ?? 0,
-    ...(scoresB ? { B: scoresB[key] ?? 0 } : {}),
+    A: valueFor(scores, key, skipped),
+    ...(scoresB ? { B: valueFor(scoresB, key, skippedB ?? skipped) } : {}),
   }));
 
   return (
@@ -33,6 +53,16 @@ export default function KaalRadarChart({ scores, scoresB, labelA = 'Model', labe
         <PolarAngleAxis
           dataKey="dim"
           tick={{ fill: '#9CA3AF', fontSize: 11 }}
+        />
+        {/* KVS dimensions are always 0–10. Without an explicit domain recharts
+            auto-scales the radius to a "nice" number above the data max, so
+            the outer ring moves between audits and two fingerprints cannot be
+            compared by shape or area. */}
+        <PolarRadiusAxis
+          domain={[0, 10]}
+          tickCount={6}
+          tick={false}
+          axisLine={false}
         />
         <Radar
           name={labelA}

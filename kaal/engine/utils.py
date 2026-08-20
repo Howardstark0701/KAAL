@@ -146,3 +146,63 @@ def perturbation_to_pil(perturbation: torch.Tensor, amplify: float = 10.0) -> Im
     t_vis = (t * amplify + 0.5).clamp(0.0, 1.0)
     arr = (t_vis.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr, mode="RGB")
+
+
+# ---------------------------------------------------------------------------
+# GPU / VRAM validation — pre-audit OOM guard
+# ---------------------------------------------------------------------------
+
+def validate_gpu_for_dataset(
+    device: str,
+    dataset_size: int,
+    model_vram_estimate_mb: int,
+) -> tuple[bool, str]:
+    """Check whether the requested device has enough VRAM for an audit.
+
+    Args:
+        device:                 'cpu' or 'cuda'.
+        dataset_size:           Number of samples in the dataset.
+        model_vram_estimate_mb: Rough model footprint in MB.
+
+    Returns:
+        (is_safe, warning_or_error). If not safe, the message explains what's
+        wrong and what to do. CPU is always safe.
+
+    This is defensive — the estimate is rough and deliberately conservative,
+    but it catches obvious OOMs before they happen and gives actionable
+    guidance (smaller dataset, fewer steps, or CPU).
+    """
+    if device != "cuda":
+        return True, ""  # CPU is always safe
+
+    # Check CUDA availability
+    if not torch.cuda.is_available():
+        return False, (
+            "--device cuda requested but CUDA is not available. "
+            "Verify NVIDIA drivers and CUDA toolkit are installed. "
+            "Run: nvidia-smi"
+        )
+
+    # Get available VRAM
+    available_vram_mb = torch.cuda.get_device_properties(0).total_memory // (1024**2)
+
+    # Estimate total memory needed:
+    # model_vram + (dataset_size * avg_sample_mb) + overhead
+    avg_sample_mb = 2  # rough: 3-channel 512x512 float32 ~= 3MB
+    dataset_vram_mb = dataset_size * avg_sample_mb
+    overhead_mb = 500  # PyTorch internals, gradients, etc.
+    total_needed_mb = model_vram_estimate_mb + dataset_vram_mb + overhead_mb
+
+    # Safety margin: leave 10% free
+    safe_threshold_mb = available_vram_mb * 0.9
+
+    if total_needed_mb > safe_threshold_mb:
+        return False, (
+            f"Insufficient VRAM. Model: ~{model_vram_estimate_mb}MB, "
+            f"Dataset: ~{dataset_vram_mb}MB, Overhead: {overhead_mb}MB = "
+            f"{total_needed_mb}MB total needed. "
+            f"Available: {available_vram_mb}MB ({available_vram_mb - int(safe_threshold_mb)}MB reserved). "
+            f"Try a smaller dataset, reduce --batch-size, or use --device cpu."
+        )
+
+    return True, ""

@@ -400,6 +400,7 @@ def blackbox_attack_dataset(
             "success_rate": 0.0,
             "avg_queries_used": 0.0,
             "avg_query_efficiency": 0.0,
+            "max_queries": max_queries,
             "epsilon_used": epsilon,
             "total_images": 0,
             "successful_attacks": 0,
@@ -415,6 +416,7 @@ def blackbox_attack_dataset(
         "avg_query_efficiency": round(
             sum(r.query_efficiency for r in results) / len(results), 4
         ),
+        "max_queries": max_queries,
         "epsilon_used": results[0].epsilon_used,
         "total_images": len(results),
         "successful_attacks": len(successful),

@@ -362,3 +362,101 @@ class TestReportIntegration:
         with open(json_path) as f:
             doc = json.load(f)
         assert doc["kvs"]["score"] == kvs_res.score
+
+
+# ---------------------------------------------------------------------------
+# Regression guards — findings F1 and F2
+# ---------------------------------------------------------------------------
+
+class TestBlackboxAndCurveInReport:
+    """A scored KVS dimension must be substantiated by the report.
+
+    F2: black-box fed calculate_kvs() but was never passed to the report
+    generators, so report.json claimed blackbox_efficiency in
+    dimensions_tested while attacks.blackbox was null.
+    """
+
+    def _aggregate(self):
+        # Shape returned by blackbox_attack_dataset(): averages, no .success.
+        return {
+            "success_rate": 0.8,
+            "avg_queries_used": 412.5,
+            "avg_query_efficiency": 0.63,
+            "total_images": 10,
+            "successful_attacks": 8,
+            "max_queries": 1000,
+        }
+
+    def test_blackbox_aggregate_is_written(self, tmp_path):
+        out = str(tmp_path / "r.json")
+        generate_json_report(
+            output_path=out,
+            model_info={"path": "m.pt", "name": "m", "framework": "pytorch",
+                        "input_shape": [3, 224, 224], "num_classes": 10},
+            dataset_info={"path": "d", "total_images": 10, "formats": {"jpg": 10}},
+            blackbox_result=self._aggregate(),
+        )
+        with open(out, encoding="utf-8") as f:
+            doc = json.load(f)
+        bb = doc["attacks"]["blackbox"]
+        # The aggregate's real numbers must survive, not collapse to zero.
+        assert bb["success_rate"] == pytest.approx(0.8)
+        assert bb["query_efficiency"] == pytest.approx(0.63)
+        assert bb["avg_queries_used"] == pytest.approx(412.5)
+        assert bb["total_images"] == 10
+
+    def test_blackbox_single_result_still_supported(self, tmp_path):
+        single = type("BB", (), {
+            "success": True, "queries_used": 300, "max_queries": 1000,
+            "query_efficiency": 0.5, "plain_english": "ok",
+        })()
+        out = str(tmp_path / "r2.json")
+        generate_json_report(
+            output_path=out,
+            model_info={"path": "m.pt", "name": "m", "framework": "pytorch",
+                        "input_shape": [3, 224, 224], "num_classes": 10},
+            dataset_info={"path": "d", "total_images": 1, "formats": {"jpg": 1}},
+            blackbox_result=single,
+        )
+        with open(out, encoding="utf-8") as f:
+            doc = json.load(f)
+        bb = doc["attacks"]["blackbox"]
+        assert bb["success_rate"] == pytest.approx(1.0)
+        assert bb["queries_used"] == 300
+
+    def test_epsilon_curve_recorded(self, tmp_path):
+        """F1 evidence: the measured threshold behind Dim3a is in the report."""
+        curve = {
+            "epsilons": [0.5 / 255, 1.0 / 255],
+            "success_rates": [0.2, 0.7],
+            "epsilon_50": 1.0 / 255,
+            "target_rate": 0.5,
+            "images_sampled": 20,
+        }
+        out = str(tmp_path / "r3.json")
+        generate_json_report(
+            output_path=out,
+            model_info={"path": "m.pt", "name": "m", "framework": "pytorch",
+                        "input_shape": [3, 224, 224], "num_classes": 10},
+            dataset_info={"path": "d", "total_images": 20, "formats": {"jpg": 20}},
+            epsilon_curve=curve,
+        )
+        with open(out, encoding="utf-8") as f:
+            doc = json.load(f)
+        sec = doc["epsilon_robustness"]
+        assert sec["epsilon_50"] == pytest.approx(1.0 / 255, abs=1e-6)
+        assert sec["images_sampled"] == 20
+        # 6dp so 0.5/255 and 1/255 stay distinguishable
+        assert sec["epsilons"][0] != sec["epsilons"][1]
+
+    def test_epsilon_section_absent_when_not_measured(self, tmp_path):
+        out = str(tmp_path / "r4.json")
+        generate_json_report(
+            output_path=out,
+            model_info={"path": "m.pt", "name": "m", "framework": "pytorch",
+                        "input_shape": [3, 224, 224], "num_classes": 10},
+            dataset_info={"path": "d", "total_images": 1, "formats": {"jpg": 1}},
+        )
+        with open(out, encoding="utf-8") as f:
+            doc = json.load(f)
+        assert doc["epsilon_robustness"] == {}

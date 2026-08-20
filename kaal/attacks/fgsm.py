@@ -264,6 +264,116 @@ def fgsm_attack_dataset(
 
 
 # ---------------------------------------------------------------------------
+# Epsilon robustness curve — the measured perturbation threshold
+# ---------------------------------------------------------------------------
+
+# Ladder in the units the adversarial-robustness literature reports: eighths of
+# a step through n/255. Geometric rather than linear because robustness
+# thresholds are scale-free — the meaningful gap is 2/255 vs 8/255, not
+# 0.10 vs 0.11. Aligning to /255 also keeps every rung representable in an
+# 8-bit image; note that the first rung (0.5/255) sits *below* one quantisation
+# step, so a model broken there is broken by a perturbation that cannot survive
+# being saved as a PNG.
+DEFAULT_EPSILON_LADDER: tuple[float, ...] = (
+    0.5 / 255,    # 0.00196 — sub-quantisation
+    1.0 / 255,    # 0.00392
+    2.0 / 255,    # 0.00784
+    4.0 / 255,    # 0.01569
+    8.0 / 255,    # 0.03137 — the de facto standard ImageNet L∞ budget
+    16.0 / 255,   # 0.06275
+    32.0 / 255,   # 0.12549
+)
+
+# Fraction of the dataset that must be misclassified for an epsilon to count as
+# the model's breaking point. 0.5 = "this perturbation fools the model more
+# often than not".
+_EPSILON_TARGET_RATE = 0.5
+
+# Curve measurement is O(len(ladder) x images), so it samples rather than
+# sweeping the whole dataset. 20 images at 8 epsilons = 160 FGSM calls.
+DEFAULT_CURVE_MAX_IMAGES = 20
+
+
+def epsilon_robustness_curve(
+    model: KaalModel,
+    dataset,
+    ladder: Optional[tuple] = None,
+    max_images: Optional[int] = None,
+) -> dict:
+    """Measure FGSM success rate across a ladder of epsilon values.
+
+    This is the *measured* perturbation threshold — the smallest L∞ budget at
+    which the model misclassifies at least half the sample. Unlike a fixed-
+    epsilon attack (whose perturbation always saturates to exactly epsilon by
+    construction, carrying no information about the model), this discriminates
+    between a model that breaks at 0.002 and one that holds to 0.064.
+
+    Args:
+        model:      KaalModel instance.
+        dataset:    KaalDataset from load_dataset().
+        ladder:     Ascending epsilon values to test. Defaults to
+                    DEFAULT_EPSILON_LADDER.
+        max_images: Cap on images sampled per epsilon. Defaults to
+                    DEFAULT_CURVE_MAX_IMAGES.
+
+    Returns:
+        dict with keys:
+            "epsilons":       list[float]  — the rungs actually evaluated
+            "success_rates":  list[float]  — misclassification rate at each rung
+            "epsilon_50":     float | None — smallest epsilon reaching the
+                              target rate; None if the model never breaks
+            "target_rate":    float
+            "images_sampled": int
+
+    Example:
+        curve = epsilon_robustness_curve(model, dataset)
+        print(curve["epsilon_50"])   # e.g. 0.004
+    """
+    rungs = tuple(ladder) if ladder else DEFAULT_EPSILON_LADDER
+    cap = max_images if max_images is not None else DEFAULT_CURVE_MAX_IMAGES
+
+    tensors = []
+    for tensor, _path, _pil in dataset:
+        if len(tensors) >= cap:
+            break
+        tensors.append(tensor)
+
+    if not tensors:
+        return {
+            "epsilons": [], "success_rates": [], "epsilon_50": None,
+            "target_rate": _EPSILON_TARGET_RATE, "images_sampled": 0,
+        }
+
+    epsilons: list[float] = []
+    rates: list[float] = []
+    epsilon_50: Optional[float] = None
+
+    for eps in rungs:
+        successes = 0
+        for tensor in tensors:
+            if fgsm_attack(model, tensor, epsilon=eps).success:
+                successes += 1
+        rate = successes / len(tensors)
+        epsilons.append(float(eps))
+        rates.append(round(rate, 4))
+
+        if epsilon_50 is None and rate >= _EPSILON_TARGET_RATE:
+            epsilon_50 = float(eps)
+            # Success rate is monotonic in epsilon for practical purposes, and
+            # the remaining rungs cost real time. Stop once the threshold and
+            # the shape of the curve up to it are known.
+            break
+
+    return {
+        "epsilons": epsilons,
+        "success_rates": rates,
+        "epsilon_50": epsilon_50,
+        "target_rate": _EPSILON_TARGET_RATE,
+        "images_sampled": len(tensors),
+    }
+
+
+# ---------------------------------------------------------------------------
 # plain_english builder — Spec 10.1 rules
 # ---------------------------------------------------------------------------
 

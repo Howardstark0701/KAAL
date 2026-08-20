@@ -58,7 +58,7 @@ export default function ComparePage() {
             <input
               id={beforeId}
               type="text"
-              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              placeholder="43-character job ID"
               value={beforeJobId}
               onChange={(e) => setBeforeJobId(e.target.value)}
               className="w-full bg-[#111] border border-[#333] rounded px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-[#CC0000]"
@@ -69,7 +69,7 @@ export default function ComparePage() {
             <input
               id={afterId}
               type="text"
-              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              placeholder="43-character job ID"
               value={afterJobId}
               onChange={(e) => setAfterJobId(e.target.value)}
               className="w-full bg-[#111] border border-[#333] rounded px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-[#CC0000]"
@@ -79,7 +79,8 @@ export default function ComparePage() {
 
         <p className="text-xs text-gray-600 mb-4">
           Job IDs are shown in the URL after completing an audit:{' '}
-          <span className="font-mono text-gray-500">/results?job_id=xxxxxxxx</span>
+          <span className="font-mono text-gray-500">/results?job_id=…</span>{' '}
+          Job IDs expire when the server restarts.
         </p>
 
         <button
@@ -126,6 +127,8 @@ export default function ComparePage() {
               <KaalRadarChart
                 scores={result.before.dimension_scores}
                 scoresB={result.after.dimension_scores}
+                skipped={result.before.dimensions_skipped ?? []}
+                skippedB={result.after.dimensions_skipped ?? []}
                 labelA="Before"
                 labelB="After"
               />

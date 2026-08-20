@@ -23,6 +23,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from web.backend.jobs.store import job_store
+from web.backend.routes.audit import _JOB_ID_RE
 
 ws_router = APIRouter()
 
@@ -32,6 +33,12 @@ _POLL_INTERVAL = 0.5   # seconds between store polls
 @ws_router.websocket("/ws/{job_id}")
 async def websocket_progress(websocket: WebSocket, job_id: str):
     """Stream job progress to the client until complete or failed."""
+    # Reject malformed job IDs before the polling loop. A 400 isn't expressible
+    # over an established WebSocket, so we send the same message and close.
+    if not _JOB_ID_RE.match(job_id):
+        await websocket.accept()
+        await _send(websocket, "error", "Invalid job ID format.", 0, "")
+        return
     await websocket.accept()
 
     try:

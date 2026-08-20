@@ -239,13 +239,17 @@ def _audit_one(
     blackbox_rate   = None
     adv_tensors: list = []
     orig_classes: list = []
+    epsilon_curve = None
 
     # ── FGSM ─────────────────────────────────────────────────────────────────
     if "fgsm" in attack_set:
         try:
-            from kaal.attacks.fgsm import fgsm_attack_dataset
+            from kaal.attacks.fgsm import (fgsm_attack_dataset,
+                                           epsilon_robustness_curve)
             with console.status("  FGSM..."):
                 fgsm_agg = fgsm_attack_dataset(km, ds, epsilon=0.03)
+                # KVS Dim 3a needs the measured perturbation threshold.
+                epsilon_curve = epsilon_robustness_curve(km, ds)
             for r in fgsm_agg["results"]:
                 adv_tensors.append(r.adversarial_tensor)
                 orig_classes.append(r.original_class)
@@ -298,13 +302,9 @@ def _audit_one(
             with console.status("  Black-box..."):
                 bb_agg = blackbox_attack_dataset(km, ds, epsilon=0.03,
                                                  max_images=max_images)
-            from types import SimpleNamespace
-            # KVS Dim 5 reads `.query_efficiency`, so expose the dataset
-            # aggregate as an object rather than the raw dict.
-            blackbox_result = SimpleNamespace(
-                query_efficiency=bb_agg["avg_query_efficiency"],
-                success_rate=bb_agg["success_rate"],
-            )
+            # Pass the aggregate through as-is — both the scorer and the
+            # report readers accept the dict.
+            blackbox_result = bb_agg
             blackbox_rate = bb_agg["success_rate"]
             console.print(
                 f"  [dim]Black-box:[/dim] {bb_agg['success_rate']:.0%} success"
@@ -335,6 +335,7 @@ def _audit_one(
         patch_result=patch_result,
         physical_result=phys_result,
         blackbox_result=blackbox_result,
+        epsilon_curve=epsilon_curve,
     )
 
     return BenchmarkEntry(
