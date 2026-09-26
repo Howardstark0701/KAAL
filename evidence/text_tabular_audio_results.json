@@ -1,0 +1,27 @@
+{
+  "text": {
+    "model": "distilbert-base-uncased-finetuned-sst-2-english (mock)",
+    "token_substitution_success": 0.0,
+    "embedding_perturbation_success": 0.0,
+    "note": "Mock tokenizer used \u2014 same attack code path as production"
+  },
+  "tabular": {
+    "model": "RandomForestClassifier(n_estimators=100)",
+    "baseline_accuracy": 1.0,
+    "attack_success_rate": 0.1667,
+    "avg_conf_on_target": 0.6457,
+    "most_perturbed": [
+      "income",
+      "debt",
+      "credit_score"
+    ],
+    "plain_english": "Gradient-free tabular attack (epsilon=0.1, 30 steps) on 30 samples achieved 17% success rate against class 1 with average confidence 0.65; most perturbed features: income, debt, credit_score."
+  },
+  "audio": {
+    "model": "custom RMS-based 4-class numpy classifier",
+    "attack": "imperceptible waveform FGSM",
+    "success_rate": 0.0,
+    "avg_snr_db": Infinity,
+    "plain_english": "Imperceptible audio noise attack (epsilon=0.003, 50 iterations) on 5 audio clips achieved 0% success rate against class 1 with average confidence 0.97; perturbation averaged infinite SNR (no perturbation) (imperceptible threshold is ~30 dB)."
+  }
+}

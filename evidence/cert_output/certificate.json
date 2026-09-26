@@ -1,0 +1,30 @@
+{
+  "kaal_version": "1.0.0",
+  "certificate_type": "adversarial_robustness_audit",
+  "org_name": "KAAL Evidence Run",
+  "audit_timestamp": "2026-09-26T17:18:01.108033+00:00",
+  "kvs": {
+    "score": 8.1,
+    "label": "Critical",
+    "re_audit_score": 8.1,
+    "is_deterministic": true
+  },
+  "attack_results": {
+    "fgsm_success_rate": 1.0,
+    "pgd_success_rate": null,
+    "patch_success_rate": null
+  },
+  "operational_impact": "Model is Critical \u2014 highly vulnerable across multiple dimensions; adversarial attacks are trivially effective; immediate remediation required.",
+  "model_fingerprint": {
+    "file_hash": "4c7aface22857d9fe5e1f16d331057448d326d83853c5d07137cf1e751a1a41c",
+    "weight_hash": "9d05cb7cc110598f7475560b8d7d4ccf8a8efa57ebd5ef20c0da09aa8850ea09",
+    "file_size_bytes": 46849144,
+    "modified_at": "2026-08-05T21:50:20.939886+00:00",
+    "model_path": "C:\\Users\\patha\\KAAL\\demo_model.pt",
+    "generated_at": "2026-09-26T17:17:56.567433+00:00"
+  },
+  "outputs": {
+    "badge_svg": "C:\\Users\\patha\\KAAL\\evidence\\cert_output\\badge.svg",
+    "certificate_json": "C:\\Users\\patha\\KAAL\\evidence\\cert_output\\certificate.json"
+  }
+}

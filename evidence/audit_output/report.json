@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "kaal_version": "1.0.0",
+    "audit_id": "a14f4347-e889-4b89-8330-43d2479c7647",
+    "timestamp": "2026-09-26T17:17:11.017419+00:00",
+    "duration_seconds": 46.3
+  },
+  "model": {
+    "path": "demo_model.pt",
+    "name": "demo_model",
+    "framework": "pytorch",
+    "input_shape": [
+      3,
+      224,
+      224
+    ],
+    "num_classes": 1000
+  },
+  "dataset": {
+    "path": "demo_images",
+    "total_images": 10,
+    "formats": {
+      ".jpg": 10
+    }
+  },
+  "kvs": {
+    "score": 8.9,
+    "label": "Critical",
+    "color": "#CC0000",
+    "dimension_scores": {
+      "fgsm_susceptibility": 10.0,
+      "pgd_susceptibility": 10.0,
+      "empirical_robustness": 10.0,
+      "adversarial_overconfidence": 0.82
+    },
+    "dimensions_tested": [
+      "fgsm_susceptibility",
+      "pgd_susceptibility",
+      "empirical_robustness",
+      "adversarial_overconfidence"
+    ],
+    "dimensions_skipped": [
+      "physical_survivability",
+      "blackbox_efficiency"
+    ]
+  },
+  "attacks": {
+    "fgsm": {
+      "epsilon": 0.03,
+      "success_rate": 1.0,
+      "avg_confidence_delta": 0.1,
+      "plain_english": ""
+    },
+    "pgd": {
+      "epsilon": 0.03,
+      "alpha": 0.003,
+      "steps": 20,
+      "success_rate": 1.0,
+      "avg_steps_to_success": 1.0,
+      "plain_english": ""
+    }
+  },
+  "epsilon_robustness": {
+    "epsilons": [
+      0.001961
+    ],
+    "success_rates": [
+      1.0
+    ],
+    "epsilon_50": 0.001961,
+    "target_rate": 0.5,
+    "images_sampled": 10
+  },
+  "physical_robustness": {},
+  "output_files": {
+    "pdf_report": "report.pdf",
+    "json_report": "report.json",
+    "fingerprint_chart": "fingerprint.png",
+    "adversarial_examples": "adversarial",
+    "gradcam_comparisons": "gradcam"
+  },
+  "remediation": [
+    "Apply input preprocessing: JPEG compression or random noise addition before inference.",
+    "Implement adversarial training: retrain model with PGD-generated examples included in training set."
+  ]
+}
